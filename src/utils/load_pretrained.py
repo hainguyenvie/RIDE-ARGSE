@@ -128,11 +128,24 @@ def load_ride_checkpoint(checkpoint_path, num_experts=3):
     # Function to try loading with different key transformations
     def try_load_with_mapping(state_dict_to_try, description):
         try:
-            missing_keys, unexpected_keys = model.load_state_dict(state_dict_to_try, strict=False)
+            # Filter out Expert Assignment (EA) module keys - we don't use them
+            filtered_state_dict = {}
+            ea_keys_filtered = 0
+            for key, value in state_dict_to_try.items():
+                # Skip keys related to Expert Assignment module
+                if any(ea_key in key for ea_key in ['expert_help', 'confidence', 'routing']):
+                    ea_keys_filtered += 1
+                    continue
+                filtered_state_dict[key] = value
+            
+            if ea_keys_filtered > 0:
+                print(f"   Filtered out {ea_keys_filtered} Expert Assignment keys")
+            
+            missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
             if len(missing_keys) == 0 and len(unexpected_keys) == 0:
                 print(f"✅ Weights loaded successfully ({description}, perfect match)")
                 return True, 0, 0
-            elif len(missing_keys) < len(state_dict_to_try) * 0.1:  # Less than 10% missing is OK
+            elif len(missing_keys) < len(filtered_state_dict) * 0.1:  # Less than 10% missing is OK
                 print(f"✅ Weights loaded successfully ({description})")
                 if missing_keys:
                     print(f"   ⚠️ Missing keys ({len(missing_keys)}): {missing_keys[:3]}...")
