@@ -32,7 +32,7 @@ CONFIG = {
         'threshold': 20,
     },
     'experts': {
-        'names': ['ce_baseline', 'logitadjust_baseline', 'balsoftmax_baseline'],
+        'names': ['ride_ce_expert', 'ride_logitadjust_expert', 'ride_balsoftmax_expert'],
         'logits_dir': './outputs/logits',
     },
     'eval_params': {

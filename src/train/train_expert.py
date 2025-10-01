@@ -11,42 +11,56 @@ from tqdm import tqdm
 import collections
 
 # Import our custom modules
-from src.models.experts import Expert
+from src.models.ride_expert import RIDEExpert, RIDELoss
 from src.models.losses import LogitAdjustLoss, BalancedSoftmaxLoss
 from src.metrics.calibration import TemperatureScaler
 from src.data.dataloader_utils import get_expert_training_dataloaders
 
 # --- EXPERT CONFIGURATIONS ---
+# RIDE-based expert configurations with diversity-aware training
 EXPERT_CONFIGS = {
-    'ce': {
-        'name': 'ce_baseline',
-        'loss_type': 'ce',
-        'epochs': 256,
-        'lr': 0.1,
-        'weight_decay': 1e-4,
-        'dropout_rate': 0.1,  # No dropout for baseline
-        'milestones': [96, 192, 224],  # For MultiStepLR
-        'gamma': 0.1
-    },
-    'logitadjust': {
-        'name': 'logitadjust_baseline', 
-        'loss_type': 'logitadjust',
-        'epochs': 256,
-        'lr': 0.1,
-        'weight_decay': 5e-4,  # Slightly higher regularization for imbalanced data
-        'dropout_rate': 0.1,  # Light dropout for imbalanced data
-        'milestones': [160,180],
-        'gamma': 0.1
-    },
-    'balsoftmax': {
-        'name': 'balsoftmax_baseline',
-        'loss_type': 'balsoftmax', 
-        'epochs': 256,
+    'ride_ce': {
+        'name': 'ride_ce_expert',
+        'loss_type': 'ride_ce',
+        'epochs': 200,  # RIDE standard
         'lr': 0.1,
         'weight_decay': 5e-4,
-        'dropout_rate': 0.1,  # Light dropout for imbalanced data
-        'milestones': [96, 192, 224],
-        'gamma': 0.1
+        'dropout_rate': 0.0,  # RIDE typically doesn't use dropout
+        'milestones': [160, 180],  # RIDE schedule
+        'gamma': 0.01,  # RIDE uses 0.01
+        'warmup_epochs': 5,
+        'diversity_factor': -0.2,  # Negative for diversity
+        'diversity_temperature': 1.0
+    },
+    'ride_logitadjust': {
+        'name': 'ride_logitadjust_expert',
+        'loss_type': 'ride_logitadjust',
+        'epochs': 200,
+        'lr': 0.1,
+        'weight_decay': 5e-4,
+        'dropout_rate': 0.0,
+        'milestones': [160, 180],
+        'gamma': 0.01,
+        'warmup_epochs': 5,
+        'diversity_factor': -0.45,  # More aggressive diversity for imbalanced
+        'diversity_temperature': 1.0,
+        'reweight': True,
+        'reweight_epoch': 160
+    },
+    'ride_balsoftmax': {
+        'name': 'ride_balsoftmax_expert',
+        'loss_type': 'ride_balsoftmax',
+        'epochs': 200,
+        'lr': 0.1,
+        'weight_decay': 5e-4,
+        'dropout_rate': 0.0,
+        'milestones': [160, 180],
+        'gamma': 0.01,
+        'warmup_epochs': 5,
+        'diversity_factor': -0.35,  # Moderate diversity for balanced softmax
+        'diversity_temperature': 1.0,
+        'reweight': True,
+        'reweight_epoch': 160
     }
 }
 
@@ -90,10 +104,13 @@ def get_dataloaders():
     return train_loader, val_loader
 
 
-def get_loss_function(loss_type, train_loader):
+def get_loss_function(loss_type, train_loader, expert_config):
     """Create appropriate loss function based on type."""
-    if loss_type == 'ce':
-        return nn.CrossEntropyLoss()
+    if loss_type == 'ride_ce':
+        return RIDELoss(
+            diversity_factor=expert_config['diversity_factor'],
+            diversity_temperature=expert_config['diversity_temperature']
+        )
     
     print("Calculating class counts for loss function...")
     
@@ -107,10 +124,22 @@ def get_loss_function(loss_type, train_loader):
     
     class_counts = [count for _, count in sorted(collections.Counter(train_targets).items())]
     
-    if loss_type == 'logitadjust':
-        return LogitAdjustLoss(class_counts=class_counts)
-    elif loss_type == 'balsoftmax':
-        return BalancedSoftmaxLoss(class_counts=class_counts)
+    if loss_type == 'ride_logitadjust':
+        return RIDELoss(
+            diversity_factor=expert_config['diversity_factor'],
+            diversity_temperature=expert_config['diversity_temperature'],
+            reweight=expert_config.get('reweight', False),
+            reweight_epoch=expert_config.get('reweight_epoch', 160),
+            class_counts=class_counts
+        )
+    elif loss_type == 'ride_balsoftmax':
+        return RIDELoss(
+            diversity_factor=expert_config['diversity_factor'],
+            diversity_temperature=expert_config['diversity_temperature'],
+            reweight=expert_config.get('reweight', False),
+            reweight_epoch=expert_config.get('reweight_epoch', 160),
+            class_counts=class_counts
+        )
     else:
         raise ValueError(f"Loss type '{loss_type}' not supported.")
 
@@ -242,34 +271,51 @@ def train_single_expert(expert_key):
     
     train_loader, val_loader = get_dataloaders()
     
-    # Model and loss
-    model = Expert(
+    # Model and loss - RIDE Expert
+    model = RIDEExpert(
         num_classes=CONFIG['dataset']['num_classes'],
-        backbone_name='cifar_resnet32',
+        num_experts=3,  # RIDE standard
+        reduce_dimension=True,  # RIDE standard for CIFAR
+        use_norm=True,  # RIDE uses normalized linear
         dropout_rate=expert_config['dropout_rate'],
         init_weights=True
     ).to(DEVICE)
     
-    criterion = get_loss_function(loss_type, train_loader)
+    criterion = get_loss_function(loss_type, train_loader, expert_config)
     print(f"✅ Loss Function: {type(criterion).__name__}")
     
     # Print model summary
     print("📊 Model Architecture:")
     model.summary()
     
-    # Optimizer and scheduler
+    # Optimizer and scheduler - RIDE style
     optimizer = optim.SGD(
         model.parameters(), 
         lr=expert_config['lr'],
         momentum=CONFIG['train_params']['momentum'],
-        weight_decay=expert_config['weight_decay']
+        weight_decay=expert_config['weight_decay'],
+        nesterov=True  # RIDE uses Nesterov
     )
     
-    scheduler = optim.lr_scheduler.MultiStepLR(
-        optimizer, 
-        milestones=expert_config['milestones'], 
-        gamma=expert_config['gamma']
-    )
+    # RIDE-style scheduler with warmup
+    def lr_lambda(epoch):
+        warmup_epochs = expert_config.get('warmup_epochs', 5)
+        milestones = expert_config['milestones']
+        gamma = expert_config['gamma']
+        
+        # Determine base LR multiplier
+        lr_mult = 1.0
+        for milestone in milestones:
+            if epoch >= milestone:
+                lr_mult *= gamma
+        
+        # Apply warmup
+        if epoch < warmup_epochs:
+            lr_mult = lr_mult * float(1 + epoch) / warmup_epochs
+            
+        return lr_mult
+    
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # Training setup
     best_acc = 0.0
@@ -287,8 +333,15 @@ def train_single_expert(expert_key):
             inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
             
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            
+            # RIDE forward pass with features
+            model_output = model(inputs, return_features=True)
+            
+            # Update loss function epoch for reweighting
+            if hasattr(criterion, '_hook_before_epoch'):
+                criterion._hook_before_epoch(epoch)
+            
+            loss = criterion(model_output, targets)
             loss.backward()
             optimizer.step()
             
