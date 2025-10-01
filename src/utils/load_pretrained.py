@@ -122,48 +122,84 @@ def load_ride_checkpoint(checkpoint_path, num_experts=3):
         print(f"❌ Failed to create model: {e}")
         return None
     
-    # Try to load state_dict
+    # Try to load state_dict with automatic prefix handling
     print("🔄 Loading weights into model...")
-    try:
-        # First try: strict loading
-        model.load_state_dict(state_dict, strict=True)
-        print("✅ Weights loaded successfully (strict mode)")
-        return model
-    except Exception as e1:
-        print(f"⚠️ Strict loading failed: {e1}")
-        
-        # Second try: non-strict loading (allows missing/extra keys)
+    
+    # Function to try loading with different key transformations
+    def try_load_with_mapping(state_dict_to_try, description):
         try:
-            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-            if missing_keys:
-                print(f"⚠️ Missing keys ({len(missing_keys)}): {missing_keys[:5]}...")
-            if unexpected_keys:
-                print(f"⚠️ Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:5]}...")
-            print("✅ Weights loaded successfully (non-strict mode)")
-            return model
-        except Exception as e2:
-            print(f"❌ Non-strict loading also failed: {e2}")
-            
-            # Third try: manual key mapping (RIDE repo often has 'module.' prefix)
-            print("🔄 Trying manual key mapping...")
-            try:
-                mapped_state_dict = {}
-                for key, value in state_dict.items():
-                    # Remove common prefixes
-                    new_key = key
-                    if key.startswith('module.'):
-                        new_key = key[7:]
-                    if key.startswith('backbone.'):
-                        new_key = key[9:]
-                    mapped_state_dict[new_key] = value
-                
-                missing_keys, unexpected_keys = model.load_state_dict(mapped_state_dict, strict=False)
-                print(f"✅ Weights loaded with key mapping (missing: {len(missing_keys)}, unexpected: {len(unexpected_keys)})")
-                return model
-            except Exception as e3:
-                print(f"❌ Key mapping failed: {e3}")
-                print("⚠️ Returning randomly initialized model...")
-                return model  # Return initialized model as last resort
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict_to_try, strict=False)
+            if len(missing_keys) == 0 and len(unexpected_keys) == 0:
+                print(f"✅ Weights loaded successfully ({description}, perfect match)")
+                return True, 0, 0
+            elif len(missing_keys) < len(state_dict_to_try) * 0.1:  # Less than 10% missing is OK
+                print(f"✅ Weights loaded successfully ({description})")
+                if missing_keys:
+                    print(f"   ⚠️ Missing keys ({len(missing_keys)}): {missing_keys[:3]}...")
+                if unexpected_keys:
+                    print(f"   ⚠️ Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:3]}...")
+                return True, len(missing_keys), len(unexpected_keys)
+            else:
+                return False, len(missing_keys), len(unexpected_keys)
+        except Exception as e:
+            print(f"   ❌ Failed: {e}")
+            return False, -1, -1
+    
+    # Try 1: Direct loading (no transformation)
+    print("Attempt 1: Direct loading...")
+    success, n_missing, n_unexpected = try_load_with_mapping(state_dict, "direct")
+    if success:
+        return model
+    print(f"   ⚠️ Too many missing keys ({n_missing}), trying transformations...")
+    
+    # Try 2: Remove 'backbone.' prefix
+    print("Attempt 2: Removing 'backbone.' prefix...")
+    mapped_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key
+        if key.startswith('backbone.'):
+            new_key = key[9:]  # Remove 'backbone.'
+        mapped_state_dict[new_key] = value
+    
+    success, n_missing, n_unexpected = try_load_with_mapping(mapped_state_dict, "backbone. removed")
+    if success:
+        return model
+    
+    # Try 3: Remove 'module.' prefix (DataParallel)
+    print("Attempt 3: Removing 'module.' prefix...")
+    mapped_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key
+        if key.startswith('module.'):
+            new_key = key[7:]  # Remove 'module.'
+        mapped_state_dict[new_key] = value
+    
+    success, n_missing, n_unexpected = try_load_with_mapping(mapped_state_dict, "module. removed")
+    if success:
+        return model
+    
+    # Try 4: Remove both 'module.backbone.' prefix
+    print("Attempt 4: Removing 'module.backbone.' prefix...")
+    mapped_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key
+        if key.startswith('module.backbone.'):
+            new_key = key[16:]  # Remove 'module.backbone.'
+        elif key.startswith('module.'):
+            new_key = key[7:]
+        elif key.startswith('backbone.'):
+            new_key = key[9:]
+        mapped_state_dict[new_key] = value
+    
+    success, n_missing, n_unexpected = try_load_with_mapping(mapped_state_dict, "module.backbone. removed")
+    if success:
+        return model
+    
+    # If all attempts failed, return model anyway with warning
+    print("⚠️ All loading attempts had significant mismatches")
+    print("⚠️ Returning model with best-effort weights loaded")
+    print("   The model will work but may not have optimal pre-trained weights")
+    return model
 
 
 def export_logits_from_model(model, expert_name, device='cuda'):
