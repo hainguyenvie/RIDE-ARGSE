@@ -389,34 +389,64 @@ def train_single_expert(expert_key):
 
 def main():
     """Main training script - trains all 3 experts."""
-    print("🚀 AR-GSE Expert Training Pipeline")
-    print(f"Device: {DEVICE}")
-    print(f"Dataset: {CONFIG['dataset']['name']}")
-    print(f"Experts to train: {list(EXPERT_CONFIGS.keys())}")
+    import argparse
     
-    results = {}
+    parser = argparse.ArgumentParser(description='RIDE Expert Training')
+    parser.add_argument('--use-pretrained', action='store_true',
+                       help='Use pre-trained RIDE models instead of training')
+    parser.add_argument('--pretrained-model', 
+                       choices=['ride_standard', 'ride_distill', 'ride_distill_4experts'],
+                       default='ride_standard',
+                       help='Which pre-trained model to use')
     
-    for expert_key in EXPERT_CONFIGS.keys():
+    args = parser.parse_args()
+    
+    if args.use_pretrained:
+        print("🔄 Using pre-trained RIDE models...")
+        from src.utils.download_ride_pretrained import setup_pretrained_experts
+        
         try:
-            model_path = train_single_expert(expert_key)
-            results[expert_key] = {'status': 'success', 'path': model_path}
+            expert_names = setup_pretrained_experts(args.pretrained_model, DEVICE)
+            if expert_names:
+                print("✅ Pre-trained experts setup completed!")
+                print("You can now proceed to gating training:")
+                print("python -m src.train.train_gating_only --mode selective")
+            else:
+                print("❌ Failed to setup pre-trained experts")
         except Exception as e:
-            print(f"❌ Failed to train {expert_key}: {e}")
-            results[expert_key] = {'status': 'failed', 'error': str(e)}
-            continue
+            print(f"❌ Error setting up pre-trained experts: {e}")
+            print("Falling back to training from scratch...")
+            args.use_pretrained = False
     
-    print(f"\n{'='*60}")
-    print("🏁 TRAINING SUMMARY")
-    print(f"{'='*60}")
-    
-    for expert_key, result in results.items():
-        status = "✅" if result['status'] == 'success' else "❌"
-        print(f"{status} {expert_key}: {result['status']}")
-        if result['status'] == 'failed':
-            print(f"    Error: {result['error']}")
-    
-    successful = sum(1 for r in results.values() if r['status'] == 'success')
-    print(f"\nSuccessfully trained {successful}/{len(EXPERT_CONFIGS)} experts")
+    if not args.use_pretrained:
+        print("🚀 AR-GSE Expert Training Pipeline")
+        print(f"Device: {DEVICE}")
+        print(f"Dataset: {CONFIG['dataset']['name']}")
+        print(f"Experts to train: {list(EXPERT_CONFIGS.keys())}")
+        
+        results = {}
+        
+        for expert_key in EXPERT_CONFIGS.keys():
+            try:
+                model_path = train_single_expert(expert_key)
+                results[expert_key] = {'status': 'success', 'path': model_path}
+            except Exception as e:
+                print(f"❌ Failed to train {expert_key}: {e}")
+                results[expert_key] = {'status': 'failed', 'error': str(e)}
+                continue
+        
+        print(f"\n{'='*60}")
+        print("🏁 TRAINING SUMMARY")
+        print(f"{'='*60}")
+        
+        for expert_key, result in results.items():
+            status = "✅" if result['status'] == 'success' else "❌"
+            print(f"{status} {expert_key}: {result['status']}")
+            if result['status'] == 'failed':
+                print(f"    Error: {result['error']}")
+        
+        successful = sum(1 for r in results.values() if r['status'] == 'success')
+        print(f"\nSuccessfully trained {successful}/{len(EXPERT_CONFIGS)} experts")
 
 
 if __name__ == '__main__':
