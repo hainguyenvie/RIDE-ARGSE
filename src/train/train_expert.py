@@ -394,10 +394,12 @@ def main():
     parser = argparse.ArgumentParser(description='RIDE Expert Training')
     parser.add_argument('--use-pretrained', action='store_true',
                        help='Use pre-trained RIDE models instead of training')
+    parser.add_argument('--pretrained-path', type=str, default=None,
+                       help='Path to pre-trained RIDE checkpoint file (.pth)')
     parser.add_argument('--pretrained-model', 
                        choices=['ride_standard', 'ride_distill', 'ride_distill_4experts'],
                        default='ride_standard',
-                       help='Which pre-trained model to use')
+                       help='Which pre-trained model to use (if --pretrained-path not provided)')
     
     args = parser.parse_args()
     
@@ -405,8 +407,15 @@ def main():
         print("🔄 Using pre-trained RIDE models...")
         
         try:
-            from src.utils.download_ride_pretrained import setup_pretrained_experts
-            expert_names = setup_pretrained_experts(args.pretrained_model, DEVICE)
+            # Use local checkpoint path if provided, otherwise try download
+            if args.pretrained_path:
+                from src.utils.load_pretrained import setup_from_checkpoint_path
+                print(f"📁 Loading from local path: {args.pretrained_path}")
+                expert_names = setup_from_checkpoint_path(args.pretrained_path, DEVICE)
+            else:
+                from src.utils.download_ride_pretrained import setup_pretrained_experts
+                print(f"📥 Downloading pre-trained model: {args.pretrained_model}")
+                expert_names = setup_pretrained_experts(args.pretrained_model, DEVICE)
             
             if expert_names:
                 print("✅ Pre-trained experts setup completed!")
@@ -422,19 +431,20 @@ def main():
             print("\n" + "="*60)
             print("🔧 ALTERNATIVES:")
             print("="*60)
-            print("1. Install gdown for better Google Drive downloads:")
-            print("   pip install gdown")
-            print("   Then retry: python -m src.train.train_expert --use-pretrained")
+            print("1. Use local checkpoint file (RECOMMENDED):")
+            print("   Download RIDE checkpoint manually, then:")
+            print("   python -m src.train.train_expert --use-pretrained --pretrained-path /path/to/checkpoint.pth")
+            print("   Download from: https://drive.google.com/file/d/1uE8I_2JcslWGPu4O0nAFEIk7iR_Sw5lS/view")
             print()
-            print("2. Use randomly initialized RIDE experts (fallback):")
-            print("   python -m src.utils.manual_pretrained_setup")
-            print()
-            print("3. Train RIDE experts from scratch (recommended):")
+            print("2. Train RIDE experts from scratch:")
             print("   python -m src.train.train_expert")
             print()
-            print("4. Manual download:")
-            print("   Download from: https://drive.google.com/file/d/1uE8I_2JcslWGPu4O0nAFEIk7iR_Sw5lS/view")
-            print("   Save to: ./checkpoints/ride_pretrained/ride_standard.pth")
+            print("3. Use randomly initialized RIDE experts (fast fallback):")
+            print("   python -m src.utils.manual_pretrained_setup")
+            print()
+            print("4. Install gdown for automatic downloads:")
+            print("   pip install gdown")
+            print("   Then retry: python -m src.train.train_expert --use-pretrained")
             print("="*60)
             
             # Ask user what to do
