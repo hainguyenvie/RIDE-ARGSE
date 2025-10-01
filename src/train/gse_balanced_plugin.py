@@ -45,7 +45,7 @@ CONFIG = {
         'alpha_steps': 5,  # More steps for precision
         'use_conditional_alpha': True,  # use conditional acceptance for alpha updates
         'tie_break_balanced': True,  # use balanced AURC for tie-breaking when optimizing worst
-        'use_eg_outer': False,  # use EG-outer for worst-group optimization
+        'use_eg_outer': True,  # use EG-outer for worst-group optimization
         'eg_outer_T': 20,  # EG outer iterations
         'eg_outer_xi': 1.0,  # EG step size
         'use_ema_mu': True,  # Apply EMA smoothing to μ updates
