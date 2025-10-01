@@ -47,15 +47,19 @@ CONFIG = {
     }
 }
 
-def download_from_gdrive(file_id, destination):
-    """Download file from Google Drive using file ID with improved error handling"""
+def download_from_gdrive(file_id, destination, overwrite=False):
+    """Download file from Google Drive using file ID with improved error handling.
+    If overwrite=True, existing file will be replaced.
+    """
     print(f"Downloading from Google Drive (ID: {file_id})...")
     
     try:
         import gdown
         print("Using gdown for Google Drive download...")
         url = f"https://drive.google.com/uc?id={file_id}"
-        gdown.download(url, str(destination), quiet=False)
+        if overwrite and destination.exists():
+            destination.unlink(missing_ok=True)
+        gdown.download(url, str(destination), quiet=False, fuzzy=True)
         print(f"✅ Downloaded to: {destination}")
         return True
     except ImportError:
@@ -112,6 +116,17 @@ def download_with_requests(file_id, destination):
     print(f"✅ Downloaded to: {destination}")
     return True
 
+
+def _looks_like_html(path: Path) -> bool:
+    """Quick check to see if a file is HTML (often returned by Google Drive).
+    """
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(512).lower()
+        return b"<html" in head or b"<!doctype" in head
+    except Exception:
+        return False
+
 def convert_ride_checkpoint_to_our_format(ride_checkpoint_path, num_experts=3):
     """
     Convert RIDE checkpoint to our RIDEExpert format with improved error handling.
@@ -129,17 +144,48 @@ def convert_ride_checkpoint_to_our_format(ride_checkpoint_path, num_experts=3):
         print(f"❌ Checkpoint file too small ({file_size} bytes), likely corrupted")
         return None
     
+    # If file is actually HTML, force re-download
+    if _looks_like_html(Path(ride_checkpoint_path)):
+        print("❌ File appears to be an HTML page (Google Drive interstitial). Re-downloading...")
+        # Attempt re-download once
+        try:
+            # We need file id to redownload; best-effort: infer from common names
+            name = Path(ride_checkpoint_path).stem
+            for k, v in RIDE_MODEL_ZOO.items():
+                if name.startswith(k):
+                    download_from_gdrive(v['gdrive_id'], Path(ride_checkpoint_path), overwrite=True)
+                    break
+        except Exception as _:
+            pass
+
     try:
         # Load original RIDE checkpoint with better error handling
         print(f"Loading checkpoint (size: {file_size / 1024 / 1024:.1f} MB)...")
-        checkpoint = torch.load(ride_checkpoint_path, map_location='cpu', weights_only=False)
+        # Try common formats in order
+        checkpoint = None
+        load_errors = []
+        for weights_only in (False, True):
+            try:
+                checkpoint = torch.load(ride_checkpoint_path, map_location='cpu', weights_only=weights_only)
+                break
+            except Exception as e:
+                load_errors.append(str(e))
+        if checkpoint is None:
+            raise RuntimeError("; ".join(load_errors))
         print("✅ Checkpoint loaded successfully")
     except Exception as e:
         print(f"❌ Error loading checkpoint: {e}")
         print("This might be due to:")
         print("  1. Corrupted download")
         print("  2. Incompatible PyTorch version")
-        print("  3. Wrong file format")
+        print("  3. Wrong file format (e.g., zip or safetensors)")
+        # If file looks like zip, advise manual extract
+        try:
+            import zipfile
+            if zipfile.is_zipfile(ride_checkpoint_path):
+                print("🔎 It seems to be a zip file. Please extract it and point to the .pth inside.")
+        except Exception:
+            pass
         return None
     
     # Debug: Print checkpoint structure
@@ -153,17 +199,18 @@ def convert_ride_checkpoint_to_our_format(ride_checkpoint_path, num_experts=3):
     # Extract state dict (format may vary)
     state_dict = None
     if isinstance(checkpoint, dict):
-        if 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
-        elif 'model' in checkpoint:
-            state_dict = checkpoint['model']
-        elif 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-        else:
-            # Try to use the checkpoint directly as state dict
-            state_dict = checkpoint
+        # Common keys in various repos
+        for key in ('state_dict', 'model', 'model_state_dict', 'net', 'backbone'):
+            if key in checkpoint and isinstance(checkpoint[key], dict):
+                state_dict = checkpoint[key]
+                break
+        if state_dict is None:
+            # Try to treat the whole checkpoint as state dict
+            # ensure it looks like a param dict (tensor or numpy)
+            if all(isinstance(v, (torch.Tensor, bytes, bytearray)) or hasattr(v, 'shape') for v in checkpoint.values()):
+                state_dict = checkpoint
     else:
-        print("❌ Unexpected checkpoint format")
+        print("❌ Unexpected checkpoint format (not a dict)")
         return None
     
     if state_dict is None:
