@@ -403,20 +403,64 @@ def main():
     
     if args.use_pretrained:
         print("🔄 Using pre-trained RIDE models...")
-        from src.utils.download_ride_pretrained import setup_pretrained_experts
         
         try:
+            from src.utils.download_ride_pretrained import setup_pretrained_experts
             expert_names = setup_pretrained_experts(args.pretrained_model, DEVICE)
+            
             if expert_names:
                 print("✅ Pre-trained experts setup completed!")
                 print("You can now proceed to gating training:")
                 print("python -m src.train.train_gating_only --mode selective")
+                return  # Exit successfully
             else:
                 print("❌ Failed to setup pre-trained experts")
+                raise Exception("Setup returned empty expert list")
+                
         except Exception as e:
             print(f"❌ Error setting up pre-trained experts: {e}")
-            print("Falling back to training from scratch...")
-            args.use_pretrained = False
+            print("\n" + "="*60)
+            print("🔧 ALTERNATIVES:")
+            print("="*60)
+            print("1. Install gdown for better Google Drive downloads:")
+            print("   pip install gdown")
+            print("   Then retry: python -m src.train.train_expert --use-pretrained")
+            print()
+            print("2. Use randomly initialized RIDE experts (fallback):")
+            print("   python -m src.utils.manual_pretrained_setup")
+            print()
+            print("3. Train RIDE experts from scratch (recommended):")
+            print("   python -m src.train.train_expert")
+            print()
+            print("4. Manual download:")
+            print("   Download from: https://drive.google.com/file/d/1uE8I_2JcslWGPu4O0nAFEIk7iR_Sw5lS/view")
+            print("   Save to: ./checkpoints/ride_pretrained/ride_standard.pth")
+            print("="*60)
+            
+            # Ask user what to do
+            print("\nWhat would you like to do?")
+            print("1. Train from scratch (recommended)")
+            print("2. Use random initialization (faster)")
+            print("3. Exit and try manual download")
+            
+            try:
+                choice = input("Enter choice (1-3): ").strip()
+                if choice == "2":
+                    print("\n🔄 Setting up randomly initialized experts...")
+                    from src.utils.manual_pretrained_setup import create_random_initialized_experts
+                    expert_names = create_random_initialized_experts(DEVICE)
+                    if expert_names:
+                        print("✅ Random experts setup completed!")
+                        return
+                elif choice == "3":
+                    print("Exiting. Please download manually and retry.")
+                    return
+                else:
+                    print("Falling back to training from scratch...")
+                    args.use_pretrained = False
+            except KeyboardInterrupt:
+                print("\nExiting...")
+                return
     
     if not args.use_pretrained:
         print("🚀 AR-GSE Expert Training Pipeline")

@@ -7,9 +7,10 @@ scikit-learn
 hydra-core 
 omegaconf
 matplotlib 
-tqdm 
+tqdm
 rich
 einops
 pytest
 pytest-mock
-tqdm
+requests
+gdown  # For Google Drive downloads of pre-trained models
