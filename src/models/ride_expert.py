@@ -21,6 +21,16 @@ class NormedLinear(nn.Module):
         return out
 
 
+class LambdaLayer(nn.Module):
+    """Lambda layer to wrap functions as modules (for option A shortcut)"""
+    def __init__(self, lambd):
+        super(LambdaLayer, self).__init__()
+        self.lambd = lambd
+
+    def forward(self, x):
+        return self.lambd(x)
+
+
 class BasicBlock(nn.Module):
     """Basic ResNet Block for CIFAR"""
     expansion = 1
@@ -36,7 +46,8 @@ class BasicBlock(nn.Module):
         if stride != 1 or in_planes != planes:
             if option == 'A':
                 # For CIFAR ResNet paper uses option A
-                self.shortcut = nn.Sequential(
+                # Use LambdaLayer instead of raw lambda for proper serialization
+                self.shortcut = LambdaLayer(
                     lambda x: F.pad(x[:, :, ::2, ::2], (0, 0, 0, 0, (planes - in_planes) // 2, (planes - in_planes) // 2), "constant", 0)
                 )
             elif option == 'B':
