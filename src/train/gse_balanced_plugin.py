@@ -6,6 +6,7 @@ This avoids the complex primal-dual training and uses fixed-point matching inste
 import torch
 import numpy as np
 from pathlib import Path
+import torch.nn.functional as F
 import json
 from tqdm import tqdm
 from torch.utils.data import DataLoader, TensorDataset
@@ -84,8 +85,18 @@ def cache_eta_mix(gse_model, loader, class_to_group):
     gse_model.eval()
     etas, labels = [], []
     
+    # Try to fetch temperatures from loader.dataset if attached
+    temp_dict = getattr(loader.dataset, 'temperatures', None)
+    expert_names = getattr(loader.dataset, 'expert_names', None)
+
     for logits, y in tqdm(loader, desc="Caching η̃"):
         logits = logits.to(DEVICE)
+        # Apply per-expert temperature scaling if available
+        if temp_dict and expert_names:
+            for i, name in enumerate(expert_names):
+                T = float(temp_dict.get(name, 1.0))
+                if abs(T - 1.0) > 1e-6:
+                    logits[:, i, :] = logits[:, i, :] / T
         
         # Get mixture posterior (no margin computation needed)
         expert_posteriors = torch.softmax(logits, dim=-1)  # [B, E, C]
@@ -541,6 +552,9 @@ def load_data_from_logits(config):
         {'split_name': 'val_lt', 'base_dataset': cifar_test_full, 'indices_file': 'val_lt_indices.json'}
     ]
     
+    # Optional temperatures placeholder (will be filled later)
+    temperatures = None
+
     for split in splits_config:
         split_name = split['split_name']
         base_dataset = split['base_dataset']
@@ -561,6 +575,9 @@ def load_data_from_logits(config):
 
         labels = torch.tensor(np.array(base_dataset.targets)[indices])
         dataset = TensorDataset(stacked_logits, labels)
+        # Attach helpers for temperature scaling in cache stage
+        dataset.temperatures = temperatures
+        dataset.expert_names = expert_names
         dataloaders[split_name] = DataLoader(dataset, batch_size=256, shuffle=False, num_workers=4)
 
     return dataloaders['tuneV'], dataloaders['val_lt']
@@ -670,8 +687,66 @@ def main():
         model.alpha.fill_(1.0)
         model.mu.fill_(0.0)
     
-    # 4) Cache η̃ for both splits
+    # 3.1) Fit per-expert temperatures on a small subset of S1 for calibration
+    #      This improves mixture calibration and downstream α, μ optimization
+    print("\n-- Temperature Calibration (Plugin) --")
+    # Create a small buffer from S1 for calibration
+    temp_logits_buf = []
+    temp_labels_buf = []
+    for i, (x, y) in enumerate(S1_loader):
+        temp_logits_buf.append(x)
+        temp_labels_buf.append(y)
+        if (i + 1) * x.size(0) >= 2000:
+            break
+    temp_logits_small = torch.cat(temp_logits_buf)[:2000]
+    temp_labels_small = torch.cat(temp_labels_buf)[:2000]
+
+    def temperature_scale_logits(expert_logits, expert_names, temp_cfg):
+        if not temp_cfg:
+            return expert_logits
+        scaled = expert_logits.clone()
+        for i, name in enumerate(expert_names):
+            T = float(temp_cfg.get(name, 1.0))
+            if abs(T - 1.0) > 1e-6:
+                scaled[:, i, :] = scaled[:, i, :] / T
+        return scaled
+
+    def fit_temperature_scaling(expert_logits, labels, expert_names, device='cuda'):
+        print("Fitting per-expert temperature scaling (plugin)...")
+        temperatures = {}
+        E = len(expert_names)
+        for i, name in enumerate(expert_names):
+            logits_i = expert_logits[:, i, :].to(device)
+            labels_i = labels.to(device)
+            best_temp = 1.0
+            best_nll = float('inf')
+            for temp in [0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]:
+                nll = F.cross_entropy(logits_i / temp, labels_i).item()
+                if nll < best_nll:
+                    best_nll = nll
+                    best_temp = temp
+            temperatures[name] = best_temp
+            print(f"  {name}: T={best_temp:.2f} (NLL={best_nll:.4f})")
+        return temperatures
+
+    expert_names = CONFIG['experts']['names']
+    temperatures = fit_temperature_scaling(temp_logits_small, temp_labels_small, expert_names, DEVICE)
+
+    # 4) Cache η̃ for both splits (apply temperatures during caching)
     print("\n=== Caching mixture posteriors ===")
+    # Inject temperatures into datasets for cache function to pick up
+    if hasattr(S1_loader, 'dataset'):
+        try:
+            S1_loader.dataset.temperatures = temperatures
+            S1_loader.dataset.expert_names = expert_names
+        except Exception:
+            pass
+    if hasattr(S2_loader, 'dataset'):
+        try:
+            S2_loader.dataset.temperatures = temperatures
+            S2_loader.dataset.expert_names = expert_names
+        except Exception:
+            pass
     eta_S1, y_S1 = cache_eta_mix(model, S1_loader, class_to_group)
     eta_S2, y_S2 = cache_eta_mix(model, S2_loader, class_to_group) 
     
@@ -811,6 +886,7 @@ def main():
         'source': source_info,  # Method used to generate results
         'config': CONFIG,
         'gating_net_state_dict': model.gating_net.state_dict(),
+        'temperatures': temperatures,
     }
     
     # Add extra information based on method used

@@ -290,14 +290,14 @@ def export_logits_for_all_splits(model, expert_name, export_individual_experts=T
             output_dir = Path(CONFIG['output']['logits_dir']) / CONFIG['dataset']['name'] / expert_name
             output_dir.mkdir(parents=True, exist_ok=True)
             
-            all_logits = []
-            with torch.no_grad():
-                for inputs, _ in tqdm(loader, desc=f"Exporting {split_name}"):
-                    logits = model.get_calibrated_logits(inputs.to(DEVICE))
-                    all_logits.append(logits.cpu())
-            
-            all_logits = torch.cat(all_logits)
-            torch.save(all_logits.to(torch.float16), output_dir / f"{split_name}_logits.pt")
+        all_logits = []
+        with torch.no_grad():
+            for inputs, _ in tqdm(loader, desc=f"Exporting {split_name}"):
+                logits = model.get_calibrated_logits(inputs.to(DEVICE))
+                all_logits.append(logits.cpu())
+        
+        all_logits = torch.cat(all_logits)
+        torch.save(all_logits.to(torch.float16), output_dir / f"{split_name}_logits.pt")
             print(f"  ✅ {split_name}: {len(indices):,} samples → ensemble average")
     
     if export_individual_experts:
@@ -561,38 +561,38 @@ def main():
     
     if not args.use_pretrained:
         print("🚀 HYBRID RIDE Expert Training Pipeline")
-        print(f"Device: {DEVICE}")
-        print(f"Dataset: {CONFIG['dataset']['name']}")
+    print(f"Device: {DEVICE}")
+    print(f"Dataset: {CONFIG['dataset']['name']}")
         print(f"Strategy: 3 RIDE models × 3 experts = 9 total experts")
         print(f"  - RIDE-CE (head-biased, no reweight)")
         print(f"  - RIDE-LogitAdjust (balanced, with reweight)")
         print(f"  - RIDE-BalancedSoftmax (tail-focused, with reweight)")
         print(f"Key: Diversity within + Specialization across models!")
-        
-        results = {}
-        
-        for expert_key in EXPERT_CONFIGS.keys():
-            try:
-                model_path = train_single_expert(expert_key)
-                results[expert_key] = {'status': 'success', 'path': model_path}
-            except Exception as e:
-                print(f"❌ Failed to train {expert_key}: {e}")
-                results[expert_key] = {'status': 'failed', 'error': str(e)}
+    
+    results = {}
+    
+    for expert_key in EXPERT_CONFIGS.keys():
+        try:
+            model_path = train_single_expert(expert_key)
+            results[expert_key] = {'status': 'success', 'path': model_path}
+        except Exception as e:
+            print(f"❌ Failed to train {expert_key}: {e}")
+            results[expert_key] = {'status': 'failed', 'error': str(e)}
                 import traceback
                 traceback.print_exc()
-                continue
-        
-        print(f"\n{'='*60}")
-        print("🏁 TRAINING SUMMARY")
-        print(f"{'='*60}")
-        
-        for expert_key, result in results.items():
-            status = "✅" if result['status'] == 'success' else "❌"
-            print(f"{status} {expert_key}: {result['status']}")
-            if result['status'] == 'failed':
-                print(f"    Error: {result['error']}")
-        
-        successful = sum(1 for r in results.values() if r['status'] == 'success')
+            continue
+    
+    print(f"\n{'='*60}")
+    print("🏁 TRAINING SUMMARY")
+    print(f"{'='*60}")
+    
+    for expert_key, result in results.items():
+        status = "✅" if result['status'] == 'success' else "❌"
+        print(f"{status} {expert_key}: {result['status']}")
+        if result['status'] == 'failed':
+            print(f"    Error: {result['error']}")
+    
+    successful = sum(1 for r in results.values() if r['status'] == 'success')
         print(f"\nSuccessfully trained {successful}/{len(EXPERT_CONFIGS)} models")
         print(f"Total experts: {successful * 3}")
         

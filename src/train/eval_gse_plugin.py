@@ -80,6 +80,16 @@ def get_mixture_posteriors(model, logits):
     model.eval()
     with torch.no_grad():
         logits = logits.to(DEVICE)
+        # Apply temperatures saved in plugin checkpoint if available
+        if hasattr(model, 'temperatures') and isinstance(model.temperatures, dict):
+            scaled = logits.clone()
+            # Need expert names; pull from CONFIG
+            expert_names = CONFIG['experts']['names']
+            for i, name in enumerate(expert_names):
+                T = float(model.temperatures.get(name, 1.0))
+                if abs(T - 1.0) > 1e-6:
+                    scaled[:, i, :] = scaled[:, i, :] / T
+            logits = scaled
         
         # Get expert posteriors
         expert_posteriors = torch.softmax(logits, dim=-1)  # [B, E, C]
@@ -242,6 +252,7 @@ def main():
     class_to_group = checkpoint['class_to_group'].to(DEVICE)
     num_groups = checkpoint['num_groups']
     plugin_threshold = checkpoint.get('threshold', checkpoint.get('c'))  # Backward compatibility
+    temperatures = checkpoint.get('temperatures', {})
     
     print("✅ Loaded optimal parameters:")
     print(f"   α* = [{alpha_star[0]:.4f}, {alpha_star[1]:.4f}]")
@@ -271,6 +282,8 @@ def main():
     print(f"✅ Dynamic gating feature dim: {gating_feature_dim}")
     
     model = AR_GSE(num_experts, CONFIG['dataset']['num_classes'], num_groups, gating_feature_dim).to(DEVICE)
+    # Attach temperatures so get_mixture_posteriors can apply scaling
+    model.temperatures = temperatures
     
     # Load gating network weights with dimension compatibility check
     if 'gating_net_state_dict' in checkpoint:

@@ -39,18 +39,18 @@ CONFIG = {
         'use_hybrid_ride': True,  # 3 models with different losses, each with RIDE diversity
     },
     'gating_params': {
-        'epochs': 25,         # Standard epochs
+        'epochs': 30,         # Slightly longer to stabilize specialization
         'batch_size': 256,
         'lr': 5e-4,          # Reduced for stability (was too high)
         'weight_decay': 2e-4, # Standard weight decay
         'balanced_training': True,  # Enable tail-aware training
-        'tail_weight': 1.5,  # Moderate tail boosting
+        'tail_weight': 1.8,  # Stronger tail boosting to nudge α specialization
         'use_freq_weighting': True,  # Use frequency-based soft weighting
         'entropy_penalty': 0.005,  # Mild gating diversity (not too aggressive)
-        'diversity_penalty': 0.001,  # Mild expert usage balance
+        'diversity_penalty': 0.002,  # Slightly stronger usage balance
         'gradient_clip': 0.5,  # Gradient clipping for stability
-        'use_ride_routing': False,  # Disable aggressive RIDE routing for now
-        'disagreement_weight': 0.0,  # Start without disagreement-based routing
+        'use_ride_routing': True,   # Enable mild RIDE-aware routing
+        'disagreement_weight': 0.1,  # Low weight to avoid instability
     },
     'selective': {
         # Core selective parameters - balanced for RIDE
