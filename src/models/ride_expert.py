@@ -284,9 +284,10 @@ class RIDELoss(nn.Module):
         
         # Class reweighting (optional)
         if class_counts is not None and reweight:
-            effective_num = 1.0 - torch.pow(0.9999, torch.tensor(class_counts))
+            effective_num = 1.0 - torch.pow(0.9999, torch.tensor(class_counts, dtype=torch.float32))
             weights = (1.0 - 0.9999) / effective_num
-            self.per_cls_weights = weights / weights.sum() * len(weights)
+            per_cls_weights = weights / weights.sum() * len(weights)
+            self.register_buffer('per_cls_weights', per_cls_weights)  # Use register_buffer for device management
         else:
             self.per_cls_weights = None
 
