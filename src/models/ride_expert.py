@@ -235,6 +235,12 @@ class RIDEExpert(nn.Module):
         """Get calibrated logits for evaluation"""
         logits = self.forward(x, return_features=False)
         return logits / temperature
+    
+    def set_temperature(self, temperature):
+        """Set temperature for calibration (for compatibility with TemperatureScaler)."""
+        # RIDEExpert doesn't have a learnable temperature parameter
+        # This method is here for compatibility with the calibration pipeline
+        pass
 
     def summary(self):
         """Print model summary"""
