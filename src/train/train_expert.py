@@ -17,22 +17,55 @@ from src.metrics.calibration import TemperatureScaler
 from src.data.dataloader_utils import get_expert_training_dataloaders
 
 # --- EXPERT CONFIGURATIONS ---
-# TRUE RIDE: ONE model with multiple diverse experts trained jointly
+# HYBRID APPROACH: 3 RIDE models with different loss functions
+# Each model has 3 diverse experts (RIDE diversity) + different loss strategies (group specialization)
 EXPERT_CONFIGS = {
-    'ride_ensemble': {
-        'name': 'ride_ensemble',  # ONE model name
-        'loss_type': 'ride',  # RIDE loss with diversity
-        'num_experts': 3,  # Start with 3 experts for testing (can increase to 6 or 9 later)
-        'epochs': 200,  # RIDE standard
+    'ride_ce': {
+        'name': 'ride_ce',
+        'loss_type': 'ce',  # Standard CE (head-biased)
+        'num_experts': 3,
+        'epochs': 200,
         'lr': 0.1,
         'weight_decay': 5e-4,
         'dropout_rate': 0.0,
         'milestones': [160, 180],
         'gamma': 0.01,
         'warmup_epochs': 5,
-        'diversity_factor': -0.45,  # Negative = reward disagreement!
+        'diversity_factor': -0.2,  # Moderate diversity for CE
         'diversity_temperature': 1.0,
-        'reweight': True,
+        'reweight': False,  # No reweight = head bias
+        'reweight_epoch': 160
+    },
+    'ride_logitadjust': {
+        'name': 'ride_logitadjust',
+        'loss_type': 'logitadjust',  # LogitAdjust (balanced)
+        'num_experts': 3,
+        'epochs': 200,
+        'lr': 0.1,
+        'weight_decay': 5e-4,
+        'dropout_rate': 0.0,
+        'milestones': [160, 180],
+        'gamma': 0.01,
+        'warmup_epochs': 5,
+        'diversity_factor': -0.45,  # Aggressive diversity for balance
+        'diversity_temperature': 1.0,
+        'reweight': True,  # With reweight
+        'reweight_epoch': 160
+    },
+    'ride_balsoftmax': {
+        'name': 'ride_balsoftmax',
+        'loss_type': 'balsoftmax',  # BalancedSoftmax (tail-focused)
+        'num_experts': 3,
+        'epochs': 200,
+        'lr': 0.1,
+        'weight_decay': 5e-4,
+        'dropout_rate': 0.0,
+        'milestones': [160, 180],
+        'gamma': 0.01,
+        'warmup_epochs': 5,
+        'diversity_factor': -0.35,  # Moderate diversity for tail
+        'diversity_temperature': 1.0,
+        'reweight': True,  # With reweight
         'reweight_epoch': 160
     }
 }
@@ -81,10 +114,10 @@ def get_dataloaders():
 
 
 def get_loss_function(loss_type, train_loader, expert_config):
-    """Create RIDE loss function with diversity training."""
-    print("Calculating class counts for RIDE loss...")
+    """Create RIDE loss function with diversity training and optional loss-specific strategies."""
+    print(f"Creating {loss_type} loss with RIDE diversity...")
     
-    # Get class counts from dataset for LDAM/reweighting
+    # Get class counts from dataset
     if hasattr(train_loader.dataset, 'cifar_dataset'):
         train_targets = np.array(train_loader.dataset.cifar_dataset.targets)[train_loader.dataset.indices]
     elif hasattr(train_loader.dataset, 'dataset'):
@@ -94,14 +127,34 @@ def get_loss_function(loss_type, train_loader, expert_config):
     
     class_counts = [count for _, count in sorted(collections.Counter(train_targets).items())]
     
-    # TRUE RIDE: ONE loss with diversity
-    return RIDELoss(
-        diversity_factor=expert_config['diversity_factor'],
-        diversity_temperature=expert_config['diversity_temperature'],
-        reweight=expert_config.get('reweight', False),
-        reweight_epoch=expert_config.get('reweight_epoch', 160),
-        class_counts=class_counts
-    )
+    # Create RIDELoss with appropriate base loss strategy
+    if loss_type == 'ce':
+        # Standard CE (no reweight) - head-biased
+        return RIDELoss(
+            diversity_factor=expert_config['diversity_factor'],
+            diversity_temperature=expert_config['diversity_temperature'],
+            reweight=False,  # No reweight for head bias
+            reweight_epoch=expert_config.get('reweight_epoch', 160),
+            class_counts=None  # No class counts needed for pure CE
+        )
+    elif loss_type in ['logitadjust', 'balsoftmax']:
+        # LogitAdjust or BalancedSoftmax with reweighting
+        return RIDELoss(
+            diversity_factor=expert_config['diversity_factor'],
+            diversity_temperature=expert_config['diversity_temperature'],
+            reweight=expert_config.get('reweight', True),
+            reweight_epoch=expert_config.get('reweight_epoch', 160),
+            class_counts=class_counts  # Provide counts for reweighting
+        )
+    else:
+        # Fallback
+        return RIDELoss(
+            diversity_factor=expert_config['diversity_factor'],
+            diversity_temperature=expert_config['diversity_temperature'],
+            reweight=expert_config.get('reweight', False),
+            reweight_epoch=expert_config.get('reweight_epoch', 160),
+            class_counts=class_counts if expert_config.get('reweight', False) else None
+        )
 
 
 def validate_model(model, val_loader, device):
@@ -224,7 +277,7 @@ def export_logits_for_all_splits(model, expert_name, export_individual_experts=T
                 expert_logits_tensor = torch.cat(all_expert_logits[expert_idx])
                 
                 # Create directory for this specific expert
-                individual_expert_name = f"{expert_name}_{expert_idx}"
+                individual_expert_name = f"{expert_name}_expert_{expert_idx}"
                 individual_output_dir = Path(CONFIG['output']['logits_dir']) / CONFIG['dataset']['name'] / individual_expert_name
                 individual_output_dir.mkdir(parents=True, exist_ok=True)
                 
@@ -288,6 +341,7 @@ def train_single_expert(expert_key):
     ).to(DEVICE)
     
     criterion = get_loss_function(loss_type, train_loader, expert_config)
+    criterion = criterion.to(DEVICE)  # Move criterion to device
     print(f"✅ Loss Function: {type(criterion).__name__}")
     
     # Print model summary
@@ -506,29 +560,45 @@ def main():
                 return
     
     if not args.use_pretrained:
-        print("🚀 TRUE RIDE Expert Training Pipeline")
+        print("🚀 HYBRID RIDE Expert Training Pipeline")
         print(f"Device: {DEVICE}")
         print(f"Dataset: {CONFIG['dataset']['name']}")
-        print(f"Training: ONE RIDE model with {EXPERT_CONFIGS['ride_ensemble']['num_experts']} diverse experts")
-        print(f"Key: Negative diversity factor = experts trained to DISAGREE!")
+        print(f"Strategy: 3 RIDE models × 3 experts = 9 total experts")
+        print(f"  - RIDE-CE (head-biased, no reweight)")
+        print(f"  - RIDE-LogitAdjust (balanced, with reweight)")
+        print(f"  - RIDE-BalancedSoftmax (tail-focused, with reweight)")
+        print(f"Key: Diversity within + Specialization across models!")
         
-        # Train ONE model (not 3!)
-        try:
-            model_path = train_single_expert('ride_ensemble')
-            print(f"\n{'='*60}")
-            print("🏁 TRAINING COMPLETE")
-            print(f"{'='*60}")
-            print(f"✅ Successfully trained RIDE ensemble")
-            print(f"✅ Exported {EXPERT_CONFIGS['ride_ensemble']['num_experts']} individual expert logits")
+        results = {}
+        
+        for expert_key in EXPERT_CONFIGS.keys():
+            try:
+                model_path = train_single_expert(expert_key)
+                results[expert_key] = {'status': 'success', 'path': model_path}
+            except Exception as e:
+                print(f"❌ Failed to train {expert_key}: {e}")
+                results[expert_key] = {'status': 'failed', 'error': str(e)}
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        print(f"\n{'='*60}")
+        print("🏁 TRAINING SUMMARY")
+        print(f"{'='*60}")
+        
+        for expert_key, result in results.items():
+            status = "✅" if result['status'] == 'success' else "❌"
+            print(f"{status} {expert_key}: {result['status']}")
+            if result['status'] == 'failed':
+                print(f"    Error: {result['error']}")
+        
+        successful = sum(1 for r in results.values() if r['status'] == 'success')
+        print(f"\nSuccessfully trained {successful}/{len(EXPERT_CONFIGS)} models")
+        print(f"Total experts: {successful * 3}")
+        
+        if successful > 0:
             print(f"\nNext step: Train gating network")
             print(f"python -m src.train.train_gating_only --mode selective")
-        except Exception as e:
-            print(f"\n{'='*60}")
-            print("❌ TRAINING FAILED")
-            print(f"{'='*60}")
-            print(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
 
 
 if __name__ == '__main__':

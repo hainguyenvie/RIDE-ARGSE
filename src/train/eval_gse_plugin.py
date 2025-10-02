@@ -32,14 +32,14 @@ CONFIG = {
         'threshold': 20,
     },
     'experts': {
-        # TRUE RIDE: 3 diverse experts from ONE model trained jointly with diversity loss
+        # HYBRID: 3 RIDE models × 3 experts = 9 total (diversity + specialization)
         'names': [
-            'ride_ensemble_expert_0',
-            'ride_ensemble_expert_1',
-            'ride_ensemble_expert_2'
+            'ride_ce_expert_0', 'ride_ce_expert_1', 'ride_ce_expert_2',
+            'ride_logitadjust_expert_0', 'ride_logitadjust_expert_1', 'ride_logitadjust_expert_2',
+            'ride_balsoftmax_expert_0', 'ride_balsoftmax_expert_1', 'ride_balsoftmax_expert_2'
         ],
         'logits_dir': './outputs/logits',
-        'use_true_ride': True,  # Use true RIDE: ONE model with jointly-trained diverse experts
+        'use_hybrid_ride': True,  # 3 models with different losses, each with RIDE diversity
     },
     'eval_params': {
         'coverage_points': [0.7, 0.8, 0.9],

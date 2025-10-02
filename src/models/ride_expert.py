@@ -291,6 +291,13 @@ class RIDELoss(nn.Module):
         else:
             self.per_cls_weights = None
 
+    def to(self, device):
+        """Move module to device"""
+        super().to(device)
+        if self.per_cls_weights is not None:
+            self.per_cls_weights = self.per_cls_weights.to(device)
+        return self
+    
     def _hook_before_epoch(self, epoch):
         """Update epoch for reweighting schedule"""
         self.current_epoch = epoch
