@@ -39,47 +39,49 @@ CONFIG = {
         'use_true_ride': True,  # Use true RIDE: ONE model with jointly-trained diverse experts
     },
     'gating_params': {
-        'epochs': 25,         # More epochs for better convergence
+        'epochs': 30,         # More epochs to leverage RIDE diversity
         'batch_size': 256,
-        'lr': 8e-4,          # Slightly reduced for stability
-        'weight_decay': 2e-4, # Increased weight decay 
+        'lr': 1e-3,          # Increased for RIDE features
+        'weight_decay': 1e-4, # Reduced to allow more flexibility
         'balanced_training': True,  # Enable tail-aware training
-        'tail_weight': 1.0,  # Even softer weighting for optimal balance
+        'tail_weight': 2.0,  # Stronger tail boosting for RIDE
         'use_freq_weighting': True,  # Use frequency-based soft weighting
-        'entropy_penalty': 0.0000,  # Giảm entropy_penalty về 0 để tránh ép uniform
-        'diversity_penalty': 0.002,  # usage_balance nhỏ để tránh collapse
-        'gradient_clip': 0.5,  # NEW: Gradient clipping for stability
+        'entropy_penalty': 0.02,  # Encourage gating diversity (matches RIDE philosophy)
+        'diversity_penalty': 0.005,  # Promote expert usage balance
+        'gradient_clip': 1.0,  # Gradient clipping for stability
+        'use_ride_routing': True,  # Use RIDE-aware routing strategy
+        'disagreement_weight': 0.5,  # Weight for routing based on expert disagreement
     },
     'selective': {
-        # Core selective parameters
-        'tau': 0.70,              # global target coverage backup
-        'tau_by_group': [0.56, 0.44],  # per-group τ_k (head, tail) - updated for Pinball
-        'tau_head': 0.56,         # head coverage target (for Pinball loss)
-        'tau_tail': 0.44,         # tail coverage target (for Pinball loss)
-        'beta_tail': 2.0,         # tail weighting in L_sel (head=1, tail=β_tail)
-        'kappa': 25.0,            # sharpness κ for sigmoid smoothing (increased for better calibration)
-        'lambda_cov': 15.0,       # λ_cov global (legacy, kept for compatibility)
-        'lambda_cov_g': 20.0,     # λ_cov-g group coverage penalty (legacy)
-        'lambda_q': 1.0,          # λ_q for Pinball quantile loss
-        'lambda_cov_pinball': 20.0, # λ_cov for per-group coverage penalty in Pinball mode
-        'lambda_H': 0.01,         # λ_H entropy regularizer
-        'lambda_GA': 0.05,        # λ_GA group-aware prior KL
+        # Core selective parameters (optimized for RIDE diversity)
+        'tau': 0.65,              # Lower target for more selective (RIDE gives better quality)
+        'tau_by_group': [0.68, 0.32],  # per-group τ_k (head higher, tail lower - leverage diversity)
+        'tau_head': 0.68,         # head coverage target (trust RIDE on head)
+        'tau_tail': 0.32,         # tail coverage target (more selective on uncertain tail)
+        'beta_tail': 3.0,         # Stronger tail weighting (RIDE helps tail, emphasize it)
+        'kappa': 30.0,            # Higher sharpness for RIDE's better calibration
+        'lambda_cov': 10.0,       # Reduced global coverage penalty
+        'lambda_cov_g': 25.0,     # Increased group coverage penalty (key for tail!)
+        'lambda_q': 2.0,          # Increased Pinball weight (better threshold learning)
+        'lambda_cov_pinball': 25.0, # Increased per-group coverage penalty
+        'lambda_H': 0.02,         # Increased entropy (RIDE gives diverse experts, use them!)
+        'lambda_GA': 0.02,        # Reduced prior KL (let data decide with RIDE)
         # Scheduling
-        'stageA_epochs': 5,       # Stage A (warm-up) epochs (mixture CE)
-        'cycles': 6,              # M cycles (Stage B alternating)
-        'epochs_per_cycle': 3,    # B1 epochs per cycle
-        'alpha_steps': 2,         # B2 fixed-point steps for α per cycle
-        'update_alpha': True,     # Whether to run α updates (disable if relying on cov-g)
-        'use_quantile_t': True,   # Update t by quantile each epoch (else learnable not yet supported)
-        'alpha_min': 0.80,        # Expanded α range for better tail control
-        'alpha_max': 1.60,        # Wider range allows more aggressive tail boosting
-        'gamma_alpha': 0.20,      # EMA factor for α
+        'stageA_epochs': 8,       # Longer warm-up to learn RIDE diversity patterns
+        'cycles': 8,              # More cycles for better convergence
+        'epochs_per_cycle': 4,    # More epochs per cycle
+        'alpha_steps': 3,         # More alpha steps
+        'update_alpha': True,     # Run α updates
+        'use_quantile_t': True,   # Update t by quantile
+        'alpha_min': 0.70,        # Wider α range for RIDE (diversity enables more flexibility)
+        'alpha_max': 1.80,        # Allow aggressive tail boosting
+        'gamma_alpha': 0.25,      # EMA factor for α
         # μ / λ grid search (B3)
-    'lambda_grid': [round(x,2) for x in np.linspace(-2.0,2.0,41)],
+        'lambda_grid': [round(x,2) for x in np.linspace(-3.0, 3.0, 61)],  # Wider grid for RIDE
         'opt_objective': 'worst',  # 'worst' or 'balanced'
         # Priors & temperatures
-        'prior_tail_boost': 1.5,
-        'prior_head_boost': 1.5,
+        'prior_tail_boost': 1.0,  # Uniform priors (RIDE diversity is enough)
+        'prior_head_boost': 1.0,  # Uniform priors
         'temperature': {},        # dict name->T (fallback 1.0)
         # Logging
         'log_interval': 50,
@@ -100,11 +102,63 @@ def gating_diversity_regularizer(gating_weights, mode="usage_balance"):
     # KL(p_bar || Uniform) = sum p_bar * log(p_bar * E) >= 0 (min=0 tại đều)
     return torch.sum(p_bar * torch.log(p_bar * gating_weights.size(1)))
 
-def mixture_cross_entropy_loss(expert_logits, labels, gating_weights, sample_weights=None, 
-                            entropy_penalty=0.0, diversity_penalty=0.0):
+def ride_aware_routing_loss(expert_logits, labels, gating_weights, disagreement_weight=0.5):
     """
-    Enhanced cross-entropy loss with diversity promotion.
-    L = -log(Σ_e w_e * softmax(logits_e)[y]) + entropy_penalty * H(gating_weights) + diversity_penalty * D(gating)
+    RIDE-aware routing loss: Routes based on expert disagreement.
+    
+    Key insight: When experts disagree (high KL), we should route to the most confident expert.
+    When experts agree, we can use mixture. This leverages RIDE's diversity training!
+    """
+    expert_probs = torch.softmax(expert_logits, dim=-1)  # [B, E, C]
+    mean_posterior = expert_probs.mean(dim=1)  # [B, C]
+    
+    # Measure expert disagreement (KL divergence from mean)
+    kl_to_mean = torch.sum(
+        expert_probs * (torch.log(expert_probs + 1e-8) - torch.log(mean_posterior.unsqueeze(1) + 1e-8)),
+        dim=-1
+    )  # [B, E]
+    
+    # Average disagreement per sample
+    disagreement_score = kl_to_mean.mean(dim=-1)  # [B]
+    
+    # Get expert confidences on their top predictions
+    max_probs = expert_probs.max(dim=-1)[0]  # [B, E]
+    
+    # RIDE-aware routing logic:
+    # High disagreement → route to most confident expert (specialist)
+    # Low disagreement → use balanced mixture
+    
+    # Find most confident expert
+    most_confident_idx = max_probs.argmax(dim=-1)  # [B]
+    specialist_weights = F.one_hot(most_confident_idx, num_classes=expert_probs.size(1)).float()  # [B, E]
+    
+    # Blend between specialist and current gating based on disagreement
+    # High disagreement → more specialist, Low disagreement → more current gating
+    disagreement_normalized = torch.sigmoid(5.0 * (disagreement_score - 0.1))  # [B]
+    blended_weights = (
+        disagreement_normalized.unsqueeze(1) * specialist_weights +
+        (1 - disagreement_normalized.unsqueeze(1)) * gating_weights
+    )  # [B, E]
+    
+    # Compute prediction with blended weights
+    blended_mixture = torch.einsum('be,bec->bc', blended_weights, expert_probs)  # [B, C]
+    blended_mixture = torch.clamp(blended_mixture, min=1e-7, max=1.0-1e-7)
+    
+    # Loss on blended prediction
+    log_probs = torch.log(blended_mixture)
+    routing_loss = F.nll_loss(log_probs, labels, reduction='mean')
+    
+    return routing_loss * disagreement_weight
+
+
+def mixture_cross_entropy_loss(expert_logits, labels, gating_weights, sample_weights=None, 
+                            entropy_penalty=0.0, diversity_penalty=0.0, disagreement_weight=0.0):
+    """
+    Enhanced cross-entropy loss with diversity promotion and RIDE-aware routing.
+    L = -log(Σ_e w_e * softmax(logits_e)[y]) 
+        + entropy_penalty * H(gating_weights) 
+        + diversity_penalty * D(gating)
+        + disagreement_weight * L_ride_routing
     """
     # expert_logits: [B, E, C]
     # gating_weights: [B, E]  
@@ -140,8 +194,13 @@ def mixture_cross_entropy_loss(expert_logits, labels, gating_weights, sample_wei
     if diversity_penalty > 0:
         div_reg = gating_diversity_regularizer(gating_weights, mode="usage_balance")
         diversity_loss = diversity_penalty * div_reg
+    
+    # Add RIDE-aware routing loss
+    ride_routing_loss = 0.0
+    if disagreement_weight > 0:
+        ride_routing_loss = ride_aware_routing_loss(expert_logits, labels, gating_weights, disagreement_weight)
 
-    return ce_loss + entropy_loss + diversity_loss
+    return ce_loss + entropy_loss + diversity_loss + ride_routing_loss
 
 def compute_frequency_weights(labels, class_counts, smoothing=0.5):
     """
@@ -927,11 +986,14 @@ def train_gating_only():
                                                     torch.tensor(1.0, device=DEVICE),
                                                     torch.tensor(tail_weight, device=DEVICE))
             
-            # Mixture cross-entropy loss with sample weights, entropy penalty, and diversity penalty
-            loss = mixture_cross_entropy_loss(expert_logits, labels, gating_weights, 
-                                            sample_weights, 
-                                            entropy_penalty=CONFIG['gating_params']['entropy_penalty'],
-                                            diversity_penalty=CONFIG['gating_params']['diversity_penalty'])
+            # Enhanced mixture loss with RIDE-aware routing
+            loss = mixture_cross_entropy_loss(
+                expert_logits, labels, gating_weights, 
+                sample_weights, 
+                entropy_penalty=CONFIG['gating_params']['entropy_penalty'],
+                diversity_penalty=CONFIG['gating_params']['diversity_penalty'],
+                disagreement_weight=CONFIG['gating_params'].get('disagreement_weight', 0.0)
+            )
             
             loss.backward()
             # Apply gradient clipping if specified

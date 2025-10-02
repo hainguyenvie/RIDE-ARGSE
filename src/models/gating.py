@@ -60,12 +60,56 @@ class GatingFeatureBuilder:
         # Std of expert max probabilities (confidence dispersion)
         std_max_conf = max_probs.std(dim=-1)                         # [B]
 
-        # Concatenate per-expert features first (all [B,E])
-        per_expert_feats = [entropy, topk_mass, residual_mass, max_probs, top_gap, cosine_sim, kl_to_mean]
-        per_expert_concat = torch.cat(per_expert_feats, dim=1)       # [B, 7*E]
+        # ========== NEW RIDE-SPECIFIC FEATURES ==========
+        # These leverage RIDE's diversity training to improve routing
+        
+        # Feature 6: Expert disagreement on top prediction (crucial for RIDE!)
+        top_classes = expert_posteriors.argmax(dim=-1)  # [B, E] - each expert's prediction
+        mode_class = torch.mode(top_classes, dim=1)[0]  # [B] - most common prediction
+        disagree_with_mode = (top_classes != mode_class.unsqueeze(1)).float()  # [B, E]
+        
+        # Feature 7: Confidence on ensemble's prediction (alignment)
+        ensemble_top_class = mean_posterior.argmax(dim=-1)  # [B]
+        confidence_on_ensemble = torch.gather(
+            expert_posteriors, 2, 
+            ensemble_top_class.unsqueeze(1).unsqueeze(2).expand(B, E, 1)
+        ).squeeze(-1)  # [B, E]
+        
+        # Feature 8: Pairwise diversity (RIDE's diversity loss effect)
+        # Measures how much experts actually disagree
+        pairwise_kl_list = []
+        for i in range(E):
+            for j in range(i+1, E):
+                kl_ij = torch.sum(
+                    expert_posteriors[:, i, :] * (
+                        torch.log(expert_posteriors[:, i, :] + 1e-8) - 
+                        torch.log(expert_posteriors[:, j, :] + 1e-8)
+                    ), dim=-1
+                )
+                pairwise_kl_list.append(kl_ij)
+        mean_pairwise_kl = torch.stack(pairwise_kl_list, dim=1).mean(dim=1) if pairwise_kl_list else torch.zeros(B, device=expert_logits.device)  # [B]
+        
+        # Feature 9: Specialization gap (is there a clear specialist?)
+        max_conf_per_sample = max_probs.max(dim=-1)[0]  # [B]
+        mean_conf_per_sample = max_probs.mean(dim=-1)  # [B]
+        specialization_gap = max_conf_per_sample - mean_conf_per_sample  # [B]
+        
+        # Feature 10: Overall prediction uncertainty (for selective prediction)
+        prediction_uncertainty = kl_to_mean.mean(dim=-1)  # [B]
+        
+        # Concatenate per-expert features (all [B,E])
+        per_expert_feats = [
+            entropy, topk_mass, residual_mass, max_probs, top_gap, 
+            cosine_sim, kl_to_mean, disagree_with_mode, confidence_on_ensemble
+        ]
+        per_expert_concat = torch.cat(per_expert_feats, dim=1)       # [B, 9*E]
 
-        # Concatenate global features (broadcast not needed; just append) -> shape [B, 7E + 3]
-        global_feats = torch.stack([mean_entropy, mean_class_var, std_max_conf], dim=1)  # [B, 3]
+        # Concatenate global features -> shape [B, 9E + 6]
+        global_feats = torch.stack([
+            mean_entropy, mean_class_var, std_max_conf,
+            mean_pairwise_kl, specialization_gap, prediction_uncertainty
+        ], dim=1)  # [B, 6]
+        
         features = torch.cat([per_expert_concat, global_feats], dim=1)
         
         return features
