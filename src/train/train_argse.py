@@ -30,7 +30,12 @@ CONFIG = {
         'K': 2,                  # head/tail
     },
     'experts': {
-        'names': ['ce_baseline', 'logitadjust_baseline', 'balsoftmax_baseline'],
+        # Use HYBRID RIDE experts (3 models × 3 experts)
+        'names': [
+            'ride_ce_expert_0', 'ride_ce_expert_1', 'ride_ce_expert_2',
+            'ride_logitadjust_expert_0', 'ride_logitadjust_expert_1', 'ride_logitadjust_expert_2',
+            'ride_balsoftmax_expert_0', 'ride_balsoftmax_expert_1', 'ride_balsoftmax_expert_2'
+        ],
         'logits_dir': './outputs/logits/',
     },
     'argse_params': {
@@ -330,6 +335,22 @@ def main():
             ckpt = outdir / f"argse_{CONFIG['argse_params']['mode']}.ckpt"
             print(f"💾 New best! Saving to {ckpt}")
             torch.save(model.state_dict(), ckpt)
+
+            # Also export a plugin-compatible selective initialization checkpoint
+            # so gse_balanced_plugin can load it via use_selective_init=True
+            gating_dir = Path('./checkpoints/gating_pretrained') / CONFIG['dataset']['name']
+            gating_dir.mkdir(parents=True, exist_ok=True)
+            gating_ckpt_path = gating_dir / 'gating_selective.ckpt'
+            gating_ckpt = {
+                'gating_net_state_dict': model.gating_net.state_dict(),
+                'alpha': model.alpha.detach().cpu(),
+                'mu': model.mu.detach().cpu(),
+                # t not learned here; plugin will refit thresholds
+                'config': CONFIG,
+                'mode': 'primal_dual_fixed_point',
+            }
+            torch.save(gating_ckpt, gating_ckpt_path)
+            print(f"💾 Exported plugin-compatible init to {gating_ckpt_path}")
         else:
             epochs_no_improve += 1
 
