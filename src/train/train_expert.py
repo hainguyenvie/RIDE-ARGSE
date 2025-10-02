@@ -17,47 +17,20 @@ from src.metrics.calibration import TemperatureScaler
 from src.data.dataloader_utils import get_expert_training_dataloaders
 
 # --- EXPERT CONFIGURATIONS ---
-# RIDE-based expert configurations with diversity-aware training
+# TRUE RIDE: ONE model with multiple diverse experts trained jointly
 EXPERT_CONFIGS = {
-    'ride_ce': {
-        'name': 'ride_ce_expert',
-        'loss_type': 'ride_ce',
+    'ride_ensemble': {
+        'name': 'ride_ensemble',  # ONE model name
+        'loss_type': 'ride',  # RIDE loss with diversity
+        'num_experts': 3,  # Start with 3 experts for testing (can increase to 6 or 9 later)
         'epochs': 200,  # RIDE standard
         'lr': 0.1,
         'weight_decay': 5e-4,
-        'dropout_rate': 0.0,  # RIDE typically doesn't use dropout
-        'milestones': [160, 180],  # RIDE schedule
-        'gamma': 0.01,  # RIDE uses 0.01
-        'warmup_epochs': 5,
-        'diversity_factor': -0.2,  # Negative for diversity
-        'diversity_temperature': 1.0
-    },
-    'ride_logitadjust': {
-        'name': 'ride_logitadjust_expert',
-        'loss_type': 'ride_logitadjust',
-        'epochs': 200,
-        'lr': 0.1,
-        'weight_decay': 5e-4,
         'dropout_rate': 0.0,
         'milestones': [160, 180],
         'gamma': 0.01,
         'warmup_epochs': 5,
-        'diversity_factor': -0.45,  # More aggressive diversity for imbalanced
-        'diversity_temperature': 1.0,
-        'reweight': True,
-        'reweight_epoch': 160
-    },
-    'ride_balsoftmax': {
-        'name': 'ride_balsoftmax_expert',
-        'loss_type': 'ride_balsoftmax',
-        'epochs': 200,
-        'lr': 0.1,
-        'weight_decay': 5e-4,
-        'dropout_rate': 0.0,
-        'milestones': [160, 180],
-        'gamma': 0.01,
-        'warmup_epochs': 5,
-        'diversity_factor': -0.35,  # Moderate diversity for balanced softmax
+        'diversity_factor': -0.45,  # Negative = reward disagreement!
         'diversity_temperature': 1.0,
         'reweight': True,
         'reweight_epoch': 160
@@ -108,16 +81,10 @@ def get_dataloaders():
 
 
 def get_loss_function(loss_type, train_loader, expert_config):
-    """Create appropriate loss function based on type."""
-    if loss_type == 'ride_ce':
-        return RIDELoss(
-            diversity_factor=expert_config['diversity_factor'],
-            diversity_temperature=expert_config['diversity_temperature']
-        )
+    """Create RIDE loss function with diversity training."""
+    print("Calculating class counts for RIDE loss...")
     
-    print("Calculating class counts for loss function...")
-    
-    # Get class counts from dataset
+    # Get class counts from dataset for LDAM/reweighting
     if hasattr(train_loader.dataset, 'cifar_dataset'):
         train_targets = np.array(train_loader.dataset.cifar_dataset.targets)[train_loader.dataset.indices]
     elif hasattr(train_loader.dataset, 'dataset'):
@@ -127,24 +94,14 @@ def get_loss_function(loss_type, train_loader, expert_config):
     
     class_counts = [count for _, count in sorted(collections.Counter(train_targets).items())]
     
-    if loss_type == 'ride_logitadjust':
-        return RIDELoss(
-            diversity_factor=expert_config['diversity_factor'],
-            diversity_temperature=expert_config['diversity_temperature'],
-            reweight=expert_config.get('reweight', False),
-            reweight_epoch=expert_config.get('reweight_epoch', 160),
-            class_counts=class_counts
-        )
-    elif loss_type == 'ride_balsoftmax':
-        return RIDELoss(
-            diversity_factor=expert_config['diversity_factor'],
-            diversity_temperature=expert_config['diversity_temperature'],
-            reweight=expert_config.get('reweight', False),
-            reweight_epoch=expert_config.get('reweight_epoch', 160),
-            class_counts=class_counts
-        )
-    else:
-        raise ValueError(f"Loss type '{loss_type}' not supported.")
+    # TRUE RIDE: ONE loss with diversity
+    return RIDELoss(
+        diversity_factor=expert_config['diversity_factor'],
+        diversity_temperature=expert_config['diversity_temperature'],
+        reweight=expert_config.get('reweight', False),
+        reweight_epoch=expert_config.get('reweight_epoch', 160),
+        class_counts=class_counts
+    )
 
 
 def validate_model(model, val_loader, device):
@@ -317,10 +274,13 @@ def train_single_expert(expert_key):
     
     train_loader, val_loader = get_dataloaders()
     
-    # Model and loss - RIDE Expert
+    # Model - TRUE RIDE with num_experts from config
+    num_experts = expert_config.get('num_experts', 9)  # Default 9 for max diversity
+    print(f"🔬 Creating RIDE model with {num_experts} diverse experts...")
+    
     model = RIDEExpert(
         num_classes=CONFIG['dataset']['num_classes'],
-        num_experts=3,  # RIDE standard
+        num_experts=num_experts,  # From config (9 for true RIDE)
         reduce_dimension=True,  # RIDE standard for CIFAR
         use_norm=True,  # RIDE uses normalized linear
         dropout_rate=expert_config['dropout_rate'],
@@ -434,39 +394,66 @@ def train_single_expert(expert_key):
 
 
 def main():
-    """Main training script - trains all 3 experts."""
+    """Main training script - trains TRUE RIDE model."""
     import argparse
     
-    parser = argparse.ArgumentParser(description='RIDE Expert Training')
+    parser = argparse.ArgumentParser(description='TRUE RIDE Expert Training')
     parser.add_argument('--use-pretrained', action='store_true',
-                       help='Use pre-trained RIDE models instead of training')
+                       help='Use pre-trained RIDE checkpoint instead of training from scratch')
     parser.add_argument('--pretrained-path', type=str, default=None,
-                       help='Path to pre-trained RIDE checkpoint file (.pth)')
+                       help='Path to pre-trained RIDE checkpoint file (.pth). '
+                            'For CIFAR-100-LT, use the 3-expert model from MODEL_ZOO')
+    parser.add_argument('--num-experts', type=int, default=None,
+                       help='Override number of experts to export (default: use config value)')
     parser.add_argument('--pretrained-model', 
                        choices=['ride_standard', 'ride_distill', 'ride_distill_4experts'],
                        default='ride_standard',
-                       help='Which pre-trained model to use (if --pretrained-path not provided)')
+                       help='Which pre-trained model to download (if --pretrained-path not provided)')
     
     args = parser.parse_args()
     
     if args.use_pretrained:
-        print("🔄 Using pre-trained RIDE models...")
+        print("="*60)
+        print("🔄 TRUE RIDE: Using Pre-trained Checkpoint")
+        print("="*60)
+        
+        # Determine number of experts to export
+        num_experts_to_export = args.num_experts if args.num_experts else EXPERT_CONFIGS['ride_ensemble']['num_experts']
+        print(f"Will export {num_experts_to_export} experts from checkpoint")
         
         try:
             # Use local checkpoint path if provided, otherwise try download
             if args.pretrained_path:
                 from src.utils.load_pretrained import setup_from_checkpoint_path
                 print(f"📁 Loading from local path: {args.pretrained_path}")
-                expert_names = setup_from_checkpoint_path(args.pretrained_path, DEVICE)
+                print(f"📊 This should be a RIDE checkpoint with 3+ experts")
+                print(f"   Download from: https://drive.google.com/file/d/1uE8I_2JcslWGPu4O0nAFEIk7iR_Sw5lS/view")
+                print()
+                
+                # The checkpoint likely has 3 experts, we'll export what we need
+                expert_names = setup_from_checkpoint_path(
+                    args.pretrained_path, 
+                    DEVICE,
+                    num_experts=3,  # CIFAR-100-LT RIDE model has 3 experts
+                    export_individual=True,
+                    target_num_experts=num_experts_to_export
+                )
             else:
                 from src.utils.download_ride_pretrained import setup_pretrained_experts
                 print(f"📥 Downloading pre-trained model: {args.pretrained_model}")
                 expert_names = setup_pretrained_experts(args.pretrained_model, DEVICE)
             
             if expert_names:
-                print("✅ Pre-trained experts setup completed!")
-                print("You can now proceed to gating training:")
+                print("\n" + "="*60)
+                print("✅ Pre-trained TRUE RIDE experts setup completed!")
+                print("="*60)
+                print(f"Created {len(expert_names)} experts from ONE pre-trained model:")
+                for name in expert_names:
+                    print(f"  • {name}")
+                print()
+                print("Next step: Train gating network")
                 print("python -m src.train.train_gating_only --mode selective")
+                print("="*60)
                 return  # Exit successfully
             else:
                 print("❌ Failed to setup pre-trained experts")
@@ -519,34 +506,29 @@ def main():
                 return
     
     if not args.use_pretrained:
-        print("🚀 AR-GSE Expert Training Pipeline")
+        print("🚀 TRUE RIDE Expert Training Pipeline")
         print(f"Device: {DEVICE}")
         print(f"Dataset: {CONFIG['dataset']['name']}")
-        print(f"Experts to train: {list(EXPERT_CONFIGS.keys())}")
+        print(f"Training: ONE RIDE model with {EXPERT_CONFIGS['ride_ensemble']['num_experts']} diverse experts")
+        print(f"Key: Negative diversity factor = experts trained to DISAGREE!")
         
-        results = {}
-        
-        for expert_key in EXPERT_CONFIGS.keys():
-            try:
-                model_path = train_single_expert(expert_key)
-                results[expert_key] = {'status': 'success', 'path': model_path}
-            except Exception as e:
-                print(f"❌ Failed to train {expert_key}: {e}")
-                results[expert_key] = {'status': 'failed', 'error': str(e)}
-                continue
-        
-        print(f"\n{'='*60}")
-        print("🏁 TRAINING SUMMARY")
-        print(f"{'='*60}")
-        
-        for expert_key, result in results.items():
-            status = "✅" if result['status'] == 'success' else "❌"
-            print(f"{status} {expert_key}: {result['status']}")
-            if result['status'] == 'failed':
-                print(f"    Error: {result['error']}")
-        
-        successful = sum(1 for r in results.values() if r['status'] == 'success')
-        print(f"\nSuccessfully trained {successful}/{len(EXPERT_CONFIGS)} experts")
+        # Train ONE model (not 3!)
+        try:
+            model_path = train_single_expert('ride_ensemble')
+            print(f"\n{'='*60}")
+            print("🏁 TRAINING COMPLETE")
+            print(f"{'='*60}")
+            print(f"✅ Successfully trained RIDE ensemble")
+            print(f"✅ Exported {EXPERT_CONFIGS['ride_ensemble']['num_experts']} individual expert logits")
+            print(f"\nNext step: Train gating network")
+            print(f"python -m src.train.train_gating_only --mode selective")
+        except Exception as e:
+            print(f"\n{'='*60}")
+            print("❌ TRAINING FAILED")
+            print(f"{'='*60}")
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 if __name__ == '__main__':

@@ -29,14 +29,14 @@ CONFIG = {
         'threshold': 20,
     },
     'experts': {
-        # Individual RIDE experts (3 from each base model = 9 total for better diversity)
+        # TRUE RIDE: 3 diverse experts from ONE model trained jointly with diversity loss
         'names': [
-            'ride_ce_expert_0', 'ride_ce_expert_1', 'ride_ce_expert_2',
-            'ride_logitadjust_expert_0', 'ride_logitadjust_expert_1', 'ride_logitadjust_expert_2',
-            'ride_balsoftmax_expert_0', 'ride_balsoftmax_expert_1', 'ride_balsoftmax_expert_2'
+            'ride_ensemble_expert_0', 
+            'ride_ensemble_expert_1', 
+            'ride_ensemble_expert_2'
         ],
         'logits_dir': './outputs/logits/',
-        'use_individual_experts': True,  # Use 9 individual experts vs 3 ensemble averages
+        'use_true_ride': True,  # Use true RIDE: ONE model with jointly-trained diverse experts
     },
     'gating_params': {
         'epochs': 25,         # More epochs for better convergence
@@ -220,43 +220,44 @@ def load_two_splits_from_logits(config):
         out[split_name] = DataLoader(dataset, batch_size=CONFIG['gating_params']['batch_size'], shuffle=True if split_name=='tuneV' else False, num_workers=4)
     return out['tuneV'], out['val_lt']
 
-def build_group_priors(expert_names, K, head_boost=1.5, tail_boost=1.5):
+def build_group_priors(expert_names, K, head_boost=1.0, tail_boost=1.0):
     """
     Construct group-aware priors π_g over experts.
     
-    For head group: boost CE-based experts
-    For tail group: boost LogitAdjust/BalancedSoftmax experts
+    TRUE RIDE: All experts come from ONE model trained with diversity loss.
+    For small number of experts (3), we use uniform priors since diversity 
+    emerges naturally from training, not from prior bias.
     
-    With individual RIDE experts, this creates nuanced priors across 9 experts.
     Returns tensor [K, E].
     """
     E = len(expert_names)
     pi = torch.ones(K, E, dtype=torch.float32)
     
-    # Keywords for expert types
-    head_keywords = ['ce']  # CE is better for head
-    tail_keywords = ['logitadjust', 'balsoftmax']  # LA/BS better for tail
+    # TRUE RIDE: Expert specialization emerges from diversity training
+    # With only 3 experts, keep priors uniform (no artificial bias)
+    # The gating network will learn the natural specialization
     
-    for e, name in enumerate(expert_names):
-        lname = name.lower()
-        
-        # Boost head-friendly experts for head group
-        if any(k in lname for k in head_keywords):
-            pi[0, e] *= head_boost
-        
-        # Boost tail-friendly experts for tail group
-        if K > 1 and any(k in lname for k in tail_keywords):
-            pi[1, e] *= tail_boost
+    # For more experts (6-9), you can apply mild index-based boosting:
+    # - Early indices (0-2): slightly better for head
+    # - Later indices (6-8): slightly better for tail
+    if E > 3:  # Only apply boosting for larger ensembles
+        for e, name in enumerate(expert_names):
+            expert_idx = int(name.split('_')[-1])
+            if K > 1:
+                if expert_idx <= 2:
+                    pi[0, e] *= head_boost
+                elif expert_idx >= 6:
+                    pi[1, e] *= tail_boost
     
     # Normalize each group
     pi = pi / pi.sum(dim=1, keepdim=True)
     
     # Debug: Show prior distribution
     print(f"📊 Group priors (K={K}, E={E}):")
+    print(f"   TRUE RIDE: All {E} experts from ONE model with diversity training")
     for k in range(K):
         group_name = "head" if k == 0 else "tail"
-        top_experts = torch.argsort(pi[k], descending=True)[:3]
-        print(f"   {group_name}: top experts = {[expert_names[i] for i in top_experts]}")
+        print(f"   {group_name} group priors: {[f'{pi[k, i]:.3f}' for i in range(E)]}")
     
     return pi
 

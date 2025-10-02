@@ -215,6 +215,75 @@ def load_ride_checkpoint(checkpoint_path, num_experts=3):
     return model
 
 
+def export_logits_from_model_individual_limited(model, expert_name, device='cuda', max_experts=3):
+    """Export limited number of individual expert logits from RIDE model."""
+    print(f"📊 Exporting {max_experts} individual experts from '{expert_name}'...")
+    model = model.to(device)
+    model.eval()
+    
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+    ])
+    
+    splits_dir = Path(CONFIG['dataset']['splits_dir'])
+    splits_info = [
+        {'name': 'train', 'dataset_type': 'train', 'file': 'train_indices.json'},
+        {'name': 'tuneV', 'dataset_type': 'train', 'file': 'tuneV_indices.json'},
+        {'name': 'val_lt', 'dataset_type': 'test', 'file': 'val_lt_indices.json'},
+        {'name': 'test_lt', 'dataset_type': 'test', 'file': 'test_lt_indices.json'},
+    ]
+    
+    for split_info in splits_info:
+        split_name = split_info['name']
+        dataset_type = split_info['dataset_type']
+        indices_file = split_info['file']
+        indices_path = splits_dir / indices_file
+        
+        if not indices_path.exists():
+            continue
+            
+        # Load dataset
+        if dataset_type == 'train':
+            base_dataset = torchvision.datasets.CIFAR100(
+                root=CONFIG['dataset']['data_root'], train=True, transform=transform)
+        else:
+            base_dataset = torchvision.datasets.CIFAR100(
+                root=CONFIG['dataset']['data_root'], train=False, transform=transform)
+        
+        with open(indices_path, 'r') as f:
+            indices = json.load(f)
+        subset = Subset(base_dataset, indices)
+        loader = DataLoader(subset, batch_size=512, shuffle=False, num_workers=4)
+        
+        # Collect logits for limited number of experts
+        num_experts_to_export = min(max_experts, model.num_experts)
+        all_expert_logits = [[] for _ in range(num_experts_to_export)]
+        
+        with torch.no_grad():
+            for inputs, _ in tqdm(loader, desc=f"  {split_name}", leave=False):
+                model_output = model(inputs.to(device), return_features=True)
+                expert_logits = model_output['logits']  # [B, num_experts, C]
+                
+                for expert_idx in range(num_experts_to_export):
+                    all_expert_logits[expert_idx].append(expert_logits[:, expert_idx, :].cpu())
+        
+        # Save each individual expert
+        for expert_idx in range(num_experts_to_export):
+            expert_logits_tensor = torch.cat(all_expert_logits[expert_idx])
+            
+            individual_expert_name = f"{expert_name}_expert_{expert_idx}"
+            output_dir = Path(CONFIG['output']['logits_dir']) / CONFIG['dataset']['name'] / individual_expert_name
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            output_file = output_dir / f"{split_name}_logits.pt"
+            torch.save(expert_logits_tensor.to(torch.float16), output_file)
+        
+        print(f"  ✅ {split_name}: {len(indices):,} samples → {num_experts_to_export} experts")
+    
+    print(f"✅ Exported {num_experts_to_export} individual experts from {expert_name}")
+
+
 def export_logits_from_model_individual(model, expert_name, device='cuda'):
     """Export individual expert logits from RIDE model."""
     print(f"📊 Exporting individual experts from '{expert_name}'...")
@@ -343,7 +412,7 @@ def export_logits_from_model(model, expert_name, device='cuda'):
     print(f"✅ All logits exported to: {output_dir}")
 
 
-def setup_from_checkpoint_path(checkpoint_path, device='cuda', num_experts=3, export_individual=True):
+def setup_from_checkpoint_path(checkpoint_path, device='cuda', num_experts=3, export_individual=True, target_num_experts=3):
     """
     Setup experts from a local RIDE checkpoint file.
     
@@ -351,7 +420,8 @@ def setup_from_checkpoint_path(checkpoint_path, device='cuda', num_experts=3, ex
         checkpoint_path: Path to RIDE checkpoint (.pth file)
         device: Device to use ('cuda' or 'cpu')
         num_experts: Number of experts in the checkpoint (3 or 4)
-        export_individual: If True, export individual experts (9 total). If False, export ensemble (3 total)
+        export_individual: If True, export individual experts
+        target_num_experts: How many experts to export (3, 6, or 9)
         
     Returns:
         List of expert names that were created
@@ -359,12 +429,13 @@ def setup_from_checkpoint_path(checkpoint_path, device='cuda', num_experts=3, ex
     checkpoint_path = Path(checkpoint_path)
     
     print("=" * 60)
-    print("🚀 Setting up RIDE Experts from Local Checkpoint")
+    print("🚀 Setting up TRUE RIDE Experts from Local Checkpoint")
     print("=" * 60)
     print(f"Checkpoint: {checkpoint_path}")
     print(f"Device: {device}")
-    print(f"Experts in model: {num_experts}")
-    print(f"Export mode: {'Individual experts (9 total)' if export_individual else 'Ensemble average (3 total)'}")
+    print(f"Experts in checkpoint: {num_experts}")
+    print(f"Experts to export: {target_num_experts}")
+    print(f"Mode: {'Individual experts' if export_individual else 'Ensemble average'}")
     print("=" * 60)
     
     # Load model from checkpoint
@@ -377,36 +448,35 @@ def setup_from_checkpoint_path(checkpoint_path, device='cuda', num_experts=3, ex
     checkpoints_dir = Path(CONFIG['output']['checkpoints_dir']) / CONFIG['dataset']['name']
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create expert variants (simulating different loss-based training)
-    base_expert_names = ['ride_ce_expert', 'ride_logitadjust_expert', 'ride_balsoftmax_expert']
+    # TRUE RIDE: ONE model name
+    expert_name = 'ride_ensemble'
     
     all_expert_names = []
     
-    print(f"\n🔧 Creating expert variants...")
-    for expert_name in base_expert_names:
-        print(f"\n--- Processing {expert_name} ---")
-        
-        # Save checkpoint
-        final_model_path = checkpoints_dir / f"final_calibrated_{expert_name}.pth"
-        torch.save(model.state_dict(), final_model_path)
-        print(f"💾 Saved checkpoint: {final_model_path}")
-        
-        # Export logits
-        if export_individual:
-            export_logits_from_model_individual(model, expert_name, device)
-            # Track individual expert names
-            for i in range(num_experts):
-                all_expert_names.append(f"{expert_name}_{i}")
-        else:
-            export_logits_from_model(model, expert_name, device)
-            all_expert_names.append(expert_name)
+    print(f"\n🔧 Exporting TRUE RIDE experts from ONE model...")
+    
+    # Save checkpoint
+    final_model_path = checkpoints_dir / f"final_calibrated_{expert_name}.pth"
+    torch.save(model.state_dict(), final_model_path)
+    print(f"💾 Saved checkpoint: {final_model_path}")
+    
+    # Export logits
+    if export_individual:
+        # Export only the first target_num_experts (3, 6, or 9)
+        export_logits_from_model_individual_limited(model, expert_name, device, target_num_experts)
+        # Track individual expert names
+        for i in range(min(target_num_experts, num_experts)):
+            all_expert_names.append(f"{expert_name}_expert_{i}")
+    else:
+        export_logits_from_model(model, expert_name, device)
+        all_expert_names.append(expert_name)
     
     print("\n" + "=" * 60)
     if export_individual:
-        print(f"✅ Successfully created {len(all_expert_names)} individual experts!")
-        print(f"   ({len(base_expert_names)} base models × {num_experts} experts each)")
+        print(f"✅ Successfully created {len(all_expert_names)} TRUE RIDE experts!")
+        print(f"   (ONE model with {len(all_expert_names)} diverse experts trained jointly)")
     else:
-        print(f"✅ Successfully created {len(all_expert_names)} ensemble experts!")
+        print(f"✅ Successfully created ensemble expert!")
     print("=" * 60)
     print("Next step: Train gating network")
     print("python -m src.train.train_gating_only --mode selective")
