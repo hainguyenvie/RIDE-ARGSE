@@ -39,48 +39,48 @@ CONFIG = {
         'use_true_ride': True,  # Use true RIDE: ONE model with jointly-trained diverse experts
     },
     'gating_params': {
-        'epochs': 30,         # More epochs to leverage RIDE diversity
+        'epochs': 25,         # Standard epochs
         'batch_size': 256,
-        'lr': 1e-3,          # Increased for RIDE features
-        'weight_decay': 1e-4, # Reduced to allow more flexibility
+        'lr': 5e-4,          # Reduced for stability (was too high)
+        'weight_decay': 2e-4, # Standard weight decay
         'balanced_training': True,  # Enable tail-aware training
-        'tail_weight': 2.0,  # Stronger tail boosting for RIDE
+        'tail_weight': 1.5,  # Moderate tail boosting
         'use_freq_weighting': True,  # Use frequency-based soft weighting
-        'entropy_penalty': 0.02,  # Encourage gating diversity (matches RIDE philosophy)
-        'diversity_penalty': 0.005,  # Promote expert usage balance
-        'gradient_clip': 1.0,  # Gradient clipping for stability
-        'use_ride_routing': True,  # Use RIDE-aware routing strategy
-        'disagreement_weight': 0.5,  # Weight for routing based on expert disagreement
+        'entropy_penalty': 0.005,  # Mild gating diversity (not too aggressive)
+        'diversity_penalty': 0.001,  # Mild expert usage balance
+        'gradient_clip': 0.5,  # Gradient clipping for stability
+        'use_ride_routing': False,  # Disable aggressive RIDE routing for now
+        'disagreement_weight': 0.0,  # Start without disagreement-based routing
     },
     'selective': {
-        # Core selective parameters (optimized for RIDE diversity)
-        'tau': 0.65,              # Lower target for more selective (RIDE gives better quality)
-        'tau_by_group': [0.68, 0.32],  # per-group τ_k (head higher, tail lower - leverage diversity)
-        'tau_head': 0.68,         # head coverage target (trust RIDE on head)
-        'tau_tail': 0.32,         # tail coverage target (more selective on uncertain tail)
-        'beta_tail': 3.0,         # Stronger tail weighting (RIDE helps tail, emphasize it)
-        'kappa': 30.0,            # Higher sharpness for RIDE's better calibration
-        'lambda_cov': 10.0,       # Reduced global coverage penalty
-        'lambda_cov_g': 25.0,     # Increased group coverage penalty (key for tail!)
-        'lambda_q': 2.0,          # Increased Pinball weight (better threshold learning)
-        'lambda_cov_pinball': 25.0, # Increased per-group coverage penalty
-        'lambda_H': 0.02,         # Increased entropy (RIDE gives diverse experts, use them!)
-        'lambda_GA': 0.02,        # Reduced prior KL (let data decide with RIDE)
+        # Core selective parameters - balanced for RIDE
+        'tau': 0.70,              # Standard target coverage
+        'tau_by_group': [0.60, 0.40],  # per-group τ_k (balanced approach)
+        'tau_head': 0.60,         # head coverage target
+        'tau_tail': 0.40,         # tail coverage target
+        'beta_tail': 2.0,         # Moderate tail weighting
+        'kappa': 25.0,            # Standard sharpness
+        'lambda_cov': 15.0,       # Standard global coverage penalty
+        'lambda_cov_g': 20.0,     # Standard group coverage penalty
+        'lambda_q': 1.0,          # Standard Pinball weight
+        'lambda_cov_pinball': 20.0, # Standard per-group coverage penalty
+        'lambda_H': 0.01,         # Standard entropy regularizer
+        'lambda_GA': 0.05,        # Standard prior KL
         # Scheduling
-        'stageA_epochs': 8,       # Longer warm-up to learn RIDE diversity patterns
-        'cycles': 8,              # More cycles for better convergence
-        'epochs_per_cycle': 4,    # More epochs per cycle
-        'alpha_steps': 3,         # More alpha steps
+        'stageA_epochs': 5,       # Standard warm-up
+        'cycles': 6,              # Standard cycles
+        'epochs_per_cycle': 3,    # Standard epochs per cycle
+        'alpha_steps': 2,         # Standard alpha steps
         'update_alpha': True,     # Run α updates
         'use_quantile_t': True,   # Update t by quantile
-        'alpha_min': 0.70,        # Wider α range for RIDE (diversity enables more flexibility)
-        'alpha_max': 1.80,        # Allow aggressive tail boosting
-        'gamma_alpha': 0.25,      # EMA factor for α
+        'alpha_min': 0.80,        # Standard α range
+        'alpha_max': 1.60,        # Standard upper bound
+        'gamma_alpha': 0.20,      # Standard EMA factor for α
         # μ / λ grid search (B3)
-        'lambda_grid': [round(x,2) for x in np.linspace(-3.0, 3.0, 61)],  # Wider grid for RIDE
+        'lambda_grid': [round(x,2) for x in np.linspace(-2.0, 2.0, 41)],  # Standard grid
         'opt_objective': 'worst',  # 'worst' or 'balanced'
         # Priors & temperatures
-        'prior_tail_boost': 1.0,  # Uniform priors (RIDE diversity is enough)
+        'prior_tail_boost': 1.0,  # Uniform priors for TRUE RIDE
         'prior_head_boost': 1.0,  # Uniform priors
         'temperature': {},        # dict name->T (fallback 1.0)
         # Logging
