@@ -82,6 +82,9 @@ CONFIG = {
         'checkpoints_dir': './checkpoints/experts',
         'logits_dir': './outputs/logits',
     },
+    'export': {
+        'individual_experts': True,  # Export individual RIDE experts (9 total) instead of ensemble (3 total)
+    },
     'seed': 42
 }
 
@@ -185,9 +188,21 @@ def validate_model(model, val_loader, device):
     
     return overall_acc, group_accs
 
-def export_logits_for_all_splits(model, expert_name):
-    """Export logits for all dataset splits."""
+def export_logits_for_all_splits(model, expert_name, export_individual_experts=True):
+    """
+    Export logits for all dataset splits.
+    
+    Args:
+        model: RIDE expert model
+        expert_name: Base name (e.g., 'ride_ce_expert')
+        export_individual_experts: If True, export 3 individual experts from RIDE model
+    """
     print(f"Exporting logits for expert '{expert_name}'...")
+    if export_individual_experts:
+        print(f"  🔬 Mode: Individual RIDE experts (will create {model.num_experts} variants)")
+    else:
+        print(f"  📊 Mode: Ensemble average")
+    
     model.eval()
     
     transform = transforms.Compose([
@@ -196,8 +211,6 @@ def export_logits_for_all_splits(model, expert_name):
     ])
     
     splits_dir = Path(CONFIG['dataset']['splits_dir'])
-    output_dir = Path(CONFIG['output']['logits_dir']) / CONFIG['dataset']['name'] / expert_name
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Define splits to export
     splits_info = [
@@ -237,17 +250,50 @@ def export_logits_for_all_splits(model, expert_name):
         loader = DataLoader(subset, batch_size=512, shuffle=False, num_workers=4)
         
         # Export logits
-        all_logits = []
-        with torch.no_grad():
-            for inputs, _ in tqdm(loader, desc=f"Exporting {split_name}"):
-                logits = model.get_calibrated_logits(inputs.to(DEVICE))
-                all_logits.append(logits.cpu())
-        
-        all_logits = torch.cat(all_logits)
-        torch.save(all_logits.to(torch.float16), output_dir / f"{split_name}_logits.pt")
-        print(f"  Exported {split_name}: {len(indices):,} samples")
+        if export_individual_experts:
+            # Export individual expert logits (3 experts from this RIDE model)
+            all_expert_logits = [[] for _ in range(model.num_experts)]
+            
+            with torch.no_grad():
+                for inputs, _ in tqdm(loader, desc=f"Exporting {split_name} (individual)", leave=False):
+                    model_output = model(inputs.to(DEVICE), return_features=True)
+                    expert_logits = model_output['logits']  # [B, num_experts, C]
+                    
+                    for expert_idx in range(model.num_experts):
+                        all_expert_logits[expert_idx].append(expert_logits[:, expert_idx, :].cpu())
+            
+            # Save each individual expert
+            for expert_idx in range(model.num_experts):
+                expert_logits_tensor = torch.cat(all_expert_logits[expert_idx])
+                
+                # Create directory for this specific expert
+                individual_expert_name = f"{expert_name}_{expert_idx}"
+                individual_output_dir = Path(CONFIG['output']['logits_dir']) / CONFIG['dataset']['name'] / individual_expert_name
+                individual_output_dir.mkdir(parents=True, exist_ok=True)
+                
+                output_file = individual_output_dir / f"{split_name}_logits.pt"
+                torch.save(expert_logits_tensor.to(torch.float16), output_file)
+            
+            print(f"  ✅ {split_name}: {len(indices):,} samples → {model.num_experts} individual experts")
+        else:
+            # Export ensemble average (old behavior)
+            output_dir = Path(CONFIG['output']['logits_dir']) / CONFIG['dataset']['name'] / expert_name
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            all_logits = []
+            with torch.no_grad():
+                for inputs, _ in tqdm(loader, desc=f"Exporting {split_name}"):
+                    logits = model.get_calibrated_logits(inputs.to(DEVICE))
+                    all_logits.append(logits.cpu())
+            
+            all_logits = torch.cat(all_logits)
+            torch.save(all_logits.to(torch.float16), output_dir / f"{split_name}_logits.pt")
+            print(f"  ✅ {split_name}: {len(indices):,} samples → ensemble average")
     
-    print(f"✅ All logits exported to: {output_dir}")
+    if export_individual_experts:
+        print(f"✅ Exported {model.num_experts} individual experts from {expert_name}")
+    else:
+        print(f"✅ Exported ensemble average for {expert_name}")
 
 # --- CORE TRAINING FUNCTIONS ---
 
@@ -381,7 +427,7 @@ def train_single_expert(expert_key):
         f"Tail: {final_group_accs['tail']:.1f}%")
     
     # Export logits
-    export_logits_for_all_splits(model, expert_name)
+    export_logits_for_all_splits(model, expert_name, CONFIG['export']['individual_experts'])
     
     print(f"✅ COMPLETED: {expert_name}")
     return final_model_path

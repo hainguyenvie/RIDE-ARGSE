@@ -29,8 +29,14 @@ CONFIG = {
         'threshold': 20,
     },
     'experts': {
-        'names': ['ride_ce_expert', 'ride_logitadjust_expert', 'ride_balsoftmax_expert'],
+        # Individual RIDE experts (3 from each base model = 9 total for better diversity)
+        'names': [
+            'ride_ce_expert_0', 'ride_ce_expert_1', 'ride_ce_expert_2',
+            'ride_logitadjust_expert_0', 'ride_logitadjust_expert_1', 'ride_logitadjust_expert_2',
+            'ride_balsoftmax_expert_0', 'ride_balsoftmax_expert_1', 'ride_balsoftmax_expert_2'
+        ],
         'logits_dir': './outputs/logits/',
+        'use_individual_experts': True,  # Use 9 individual experts vs 3 ensemble averages
     },
     'gating_params': {
         'epochs': 25,         # More epochs for better convergence
@@ -215,22 +221,43 @@ def load_two_splits_from_logits(config):
     return out['tuneV'], out['val_lt']
 
 def build_group_priors(expert_names, K, head_boost=1.5, tail_boost=1.5):
-    """Construct simple group-aware priors π_g over experts.
-    K groups (assume 2 if not otherwise). For head group boost head-friendly methods (ce / irm),
-    for tail group boost tail-friendly methods (balsoftmax/logitadjust/ride/ldam/disalign).
-    Returns tensor [K, E]."""
+    """
+    Construct group-aware priors π_g over experts.
+    
+    For head group: boost CE-based experts
+    For tail group: boost LogitAdjust/BalancedSoftmax experts
+    
+    With individual RIDE experts, this creates nuanced priors across 9 experts.
+    Returns tensor [K, E].
+    """
     E = len(expert_names)
     pi = torch.ones(K, E, dtype=torch.float32)
-    head_keywords = ['ce', 'irm']
-    tail_keywords = ['balsoft', 'logitadjust', 'ride', 'ldam', 'disalign']
+    
+    # Keywords for expert types
+    head_keywords = ['ce']  # CE is better for head
+    tail_keywords = ['logitadjust', 'balsoftmax']  # LA/BS better for tail
+    
     for e, name in enumerate(expert_names):
         lname = name.lower()
+        
+        # Boost head-friendly experts for head group
         if any(k in lname for k in head_keywords):
             pi[0, e] *= head_boost
+        
+        # Boost tail-friendly experts for tail group
         if K > 1 and any(k in lname for k in tail_keywords):
             pi[1, e] *= tail_boost
+    
     # Normalize each group
     pi = pi / pi.sum(dim=1, keepdim=True)
+    
+    # Debug: Show prior distribution
+    print(f"📊 Group priors (K={K}, E={E}):")
+    for k in range(K):
+        group_name = "head" if k == 0 else "tail"
+        top_experts = torch.argsort(pi[k], descending=True)[:3]
+        print(f"   {group_name}: top experts = {[expert_names[i] for i in top_experts]}")
+    
     return pi
 
 def temperature_scale_logits(expert_logits, expert_names, temp_cfg):

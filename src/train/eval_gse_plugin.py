@@ -32,8 +32,14 @@ CONFIG = {
         'threshold': 20,
     },
     'experts': {
-        'names': ['ride_ce_expert', 'ride_logitadjust_expert', 'ride_balsoftmax_expert'],
+        # Individual RIDE experts (3 from each base model = 9 total for better diversity)
+        'names': [
+            'ride_ce_expert_0', 'ride_ce_expert_1', 'ride_ce_expert_2',
+            'ride_logitadjust_expert_0', 'ride_logitadjust_expert_1', 'ride_logitadjust_expert_2',
+            'ride_balsoftmax_expert_0', 'ride_balsoftmax_expert_1', 'ride_balsoftmax_expert_2'
+        ],
         'logits_dir': './outputs/logits',
+        'use_individual_experts': True,  # Use 9 individual experts vs 3 ensemble averages
     },
     'eval_params': {
         'coverage_points': [0.7, 0.8, 0.9],
