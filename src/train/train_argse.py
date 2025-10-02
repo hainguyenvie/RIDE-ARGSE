@@ -213,7 +213,12 @@ def main():
 
     # 3) Model & optimizers
     num_experts = len(CONFIG['experts']['names'])
-    gating_feature_dim = 4 * num_experts
+    # Compute gating feature dimension dynamically to match feature_builder output
+    with torch.no_grad():
+        dummy_logits = torch.zeros(2, num_experts, CONFIG['dataset']['num_classes']).to(DEVICE)
+        tmp_model = AR_GSE(num_experts, CONFIG['dataset']['num_classes'], num_groups, 1).to(DEVICE)
+        gating_feature_dim = tmp_model.feature_builder(dummy_logits).size(-1)
+        del tmp_model
     model = AR_GSE(num_experts, CONFIG['dataset']['num_classes'], num_groups, gating_feature_dim).to(DEVICE)
 
     # Initialize parameters more carefully
